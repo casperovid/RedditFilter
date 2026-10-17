@@ -18,7 +18,7 @@ function log(msg) { process.stderr.write(msg + '\n'); }
 if (!USER || !PASS) { log('Missing ANYIPA_USER or ANYIPA_PASS'); process.exit(1); }
 
 const browser = await chromium.launch({
-  headless: true,
+  headless: false, // run under xvfb in CI; headed looks far less like a bot
   args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'],
 });
 const ctx = await browser.newContext({
