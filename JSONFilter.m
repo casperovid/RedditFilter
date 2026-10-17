@@ -11,6 +11,11 @@
 
 static NSString *const kAutoModAccountId = @"t2_6l4z3";
 
+// Set to 1 to log each distinct recommendationContext seen in the feed, once
+// per value, so the Recommended filter can be narrowed to what it should
+// actually match. Read with:  ipsw idev syslog | grep RFRec
+#define RF_LOG_RECOMMENDATIONS 1
+
 #pragma mark - Type-safe helpers
 
 static NSDictionary *RFDict(id value) { return [value isKindOfClass:NSDictionary.class] ? value : nil; }
@@ -49,6 +54,20 @@ static BOOL RFIsHomeRecommendation(id context) {
   NSDictionary *rec = RFDict(context);
   NSString *typeName = RFString(rec[@"typeName"]);
   NSString *typeId = RFString(rec[@"typeIdentifier"]);
+#if RF_LOG_RECOMMENDATIONS
+  {
+    static NSMutableSet *seen;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ seen = [NSMutableSet new]; });
+    NSString *key = [NSString stringWithFormat:@"%@ / %@", typeName ?: @"(none)", typeId ?: @"(none)"];
+    @synchronized(seen) {
+      if (![seen containsObject:key]) {
+        [seen addObject:key];
+        NSLog(@"[RFRec] %@", key);
+      }
+    }
+  }
+#endif
   if (!typeName || !typeId) return NO;
   BOOL popularFiller = [typeName isEqualToString:@"PopularRecommendationContext"] ||
                        [typeId hasPrefix:@"global_popular"];
@@ -133,6 +152,28 @@ static BOOL RFFilterNodes(NSArray *nodes, const RFContext *ctx) {
 static BOOL RFFilterEdges(NSArray *edges, const RFContext *ctx) {
   BOOL changed = NO;
   for (id edge in edges) changed |= RFFilterNode(RFDict(edge)[@"node"], ctx);
+  return changed;
+}
+
+// Feeds only: after filtering, drop the entries whose post was emptied, so the
+// list is genuinely shorter instead of being padded with rows that render as
+// nothing. This matters because Reddit asks for the next page when a cell near
+// the end of the list comes on screen -- an emptied entry has no cell, so a
+// page with many of them never triggers the next fetch and the feed sits there
+// until it is manually refreshed.
+static BOOL RFDropEmptiedEdges(NSArray *edges, BOOL changed) {
+  if (![edges isKindOfClass:NSMutableArray.class]) return changed;
+  NSMutableArray *list = (NSMutableArray *)edges;
+  for (NSInteger i = (NSInteger)list.count - 1; i >= 0; i--) {
+    NSDictionary *node = RFDict(RFDict(list[i])[@"node"]);
+    NSString *type = RFString(node[@"__typename"]);
+    NSArray *cells = RFArray(node[@"cells"]);
+    BOOL emptied = [type isEqualToString:@"CellGroup"] && cells && cells.count == 0;
+    BOOL hiddenAd = [type isEqualToString:@"AdPost"] && RFTrue(node[@"isHidden"]);
+    if (!emptied && !hiddenAd) continue;
+    [list removeObjectAtIndex:i];
+    changed = YES;
+  }
   return changed;
 }
 
@@ -227,7 +268,8 @@ static BOOL RFFilterResponse(NSMutableDictionary *json, NSDictionary *payload, N
     NSArray *list = RFArray(RFValueAtPath(json, fast->path));
     RF_RECORD_SCHEMA(fast->operation, fast->path, list != nil, json, fast->signature);
     if (!list) return RFFilterGeneric(payload, ctx);
-    return fast->isEdges ? RFFilterEdges(list, ctx) : RFFilterNodes(list, ctx);
+    if (!fast->isEdges) return RFFilterNodes(list, ctx);
+    return RFDropEmptiedEdges(list, RFFilterEdges(list, ctx));
   }
   if ([op isEqualToString:@"PostInfoById"] || [op isEqualToString:@"PostInfoByIdComments"])
     return RFFilterPostInfo(json, payload, ctx);
