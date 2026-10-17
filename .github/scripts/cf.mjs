@@ -106,8 +106,9 @@ const url = dlResult.body.trim().replace(/^"|"$/g, '');
 
 // Verify first bytes using the page's fetch (has session cookies)
 log('Verifying IPA bytes...');
+log('Download URL host: ' + new URL(url).hostname);
 const rangeResult = await page.evaluate(async ({ u }) => {
-  const r = await fetch(u, { credentials: 'include', headers: { 'Range': 'bytes=0-3' } });
+  const r = await fetch(u, { headers: { 'Range': 'bytes=0-3' } });
   const buf = await r.arrayBuffer();
   const bytes = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
   return { status: r.status, bytes };
