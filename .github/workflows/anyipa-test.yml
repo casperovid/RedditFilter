@@ -21,13 +21,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Compute MD5 of password here; never print the raw password
-          PW_MD5=$(printf '%s' "$ANYIPA_PASS" | md5sum | cut -d' ' -f1)
-
           cp $GITHUB_WORKSPACE/.github/scripts/cf.mjs /tmp/pw/cf.mjs
 
           OUTPUT=$(cd /tmp/pw && \
-            ANYIPA_USER="$ANYIPA_USER" ANYIPA_PASS_MD5="$PW_MD5" \
+            ANYIPA_USER="$ANYIPA_USER" ANYIPA_PASS="$ANYIPA_PASS" \
             node cf.mjs 2>/tmp/cf.err || true)
           cat /tmp/cf.err >&2
 
