@@ -23,9 +23,13 @@ jobs:
 
           cp $GITHUB_WORKSPACE/.github/scripts/cf.mjs /tmp/pw/cf.mjs
 
+          which xvfb-run || { echo "xvfb-run missing, installing"; sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
+
+          RC=0
           OUTPUT=$(cd /tmp/pw && \
             ANYIPA_USER="$ANYIPA_USER" ANYIPA_PASS="$ANYIPA_PASS" \
-            xvfb-run -a --server-args="-screen 0 1280x800x24" node cf.mjs 2>/tmp/cf.err || true)
+            xvfb-run -a --server-args="-screen 0 1280x800x24" node cf.mjs 2>/tmp/cf.err) || RC=$?
+          echo "node exit code: $RC"
           cat /tmp/cf.err >&2
 
           VERSION=$(echo "$OUTPUT" | grep '^VERSION='      | cut -d= -f2- || true)
