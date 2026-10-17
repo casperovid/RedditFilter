@@ -7,73 +7,61 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Solve CF challenge and test anyipa
+      - name: Write Playwright script
+        run: |
+          mkdir -p /tmp/pw
+          python3 -c "
+          import textwrap, pathlib
+          js = textwrap.dedent('''
+            import { chromium } from \"playwright\";
+            const browser = await chromium.launch({
+              headless: true,
+              args: [\"--disable-blink-features=AutomationControlled\",\"--no-sandbox\",\"--disable-dev-shm-usage\"],
+            });
+            const ctx = await browser.newContext({
+              userAgent: \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\",
+            });
+            await ctx.addInitScript(() => {
+              Object.defineProperty(navigator, \"webdriver\", { get: () => undefined });
+            });
+            const page = await ctx.newPage();
+            process.stderr.write(\"Opening anyipa.me...\\n\");
+            await page.goto(\"https://anyipa.me/\", { waitUntil: \"domcontentloaded\", timeout: 30000 });
+            try {
+              await page.waitForFunction(() => !document.title.includes(\"Just a moment\"), { timeout: 25000 });
+              process.stderr.write(\"CF passed\\n\");
+            } catch(e) {
+              process.stderr.write(\"CF title: \" + await page.title() + \"\\n\");
+            }
+            const cookies = await ctx.cookies(\"https://anyipa.me\");
+            const cf = cookies.find(c => c.name === \"cf_clearance\");
+            const ua = await page.evaluate(() => navigator.userAgent);
+            console.log(\"UA=\" + ua);
+            console.log(\"CF=\" + (cf ? cf.value : \"\"));
+            await browser.close();
+          ''').strip()
+          pathlib.Path('/tmp/pw/cf.mjs').write_text(js)
+          print('wrote cf.mjs')
+          "
+
+      - name: Install Playwright
+        run: npm install --prefix /tmp/pw playwright
+
+      - name: Solve CF and test anyipa
         env:
           ANYIPA_USER: ${{ secrets.ANYIPA_USER }}
           ANYIPA_PASS: ${{ secrets.ANYIPA_PASS }}
         run: |
           set -u
-
-          # --- Playwright script: solve CF, return UA + cf_clearance cookie ---
-          mkdir -p /tmp/pw
-          cat > /tmp/pw/cf.mjs << 'EOF'
-          import { chromium } from 'playwright';
-
-          const browser = await chromium.launch({
-            headless: true,
-            args: [
-              '--disable-blink-features=AutomationControlled',
-              '--no-sandbox',
-              '--disable-dev-shm-usage',
-            ],
-            executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
-          });
-
-          const context = await browser.newContext({
-            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-          });
-
-          // Mask webdriver flag
-          await context.addInitScript(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-          });
-
-          const page = await context.newPage();
-          process.stderr.write('Opening anyipa.me...\n');
-          await page.goto('https://anyipa.me/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-          // Wait up to 20s for CF challenge to clear
-          try {
-            await page.waitForFunction(
-              () => !document.title.includes('Just a moment'),
-              { timeout: 20000 }
-            );
-            process.stderr.write('CF challenge passed\n');
-          } catch {
-            process.stderr.write('CF title: ' + await page.title() + '\n');
-          }
-
-          const cookies = await context.cookies('https://anyipa.me');
-          const cf = cookies.find(c => c.name === 'cf_clearance');
-          const ua = await page.evaluate(() => navigator.userAgent);
-
-          console.log('UA=' + ua);
-          console.log('CF=' + (cf ? cf.value : ''));
-          await browser.close();
-          EOF
-
-          npm install --prefix /tmp/pw playwright 2>/dev/null
-          OUTPUT=$(node --input-type=module < /tmp/cf.mjs 2>/tmp/cf.err || true)
+          OUTPUT=$(cd /tmp/pw && node cf.mjs 2>/tmp/cf.err || true)
           cat /tmp/cf.err >&2
           UA=$(echo "$OUTPUT" | grep '^UA=' | cut -d= -f2-)
           CF=$(echo "$OUTPUT" | grep '^CF=' | cut -d= -f2-)
           echo "UA prefix: ${UA:0:60}"
           [ -n "$CF" ] && echo "cf_clearance: obtained" || echo "cf_clearance: MISSING"
 
-          # --- API calls using the clearance cookie ---
           JAR="$RUNNER_TEMP/cookies.txt"
           BASE="https://anyipa.me"
-          CURL="curl -s -A \"$UA\" -H \"Cookie: cf_clearance=$CF\""
 
           echo "== 1. App Store version"
           curl -s "https://itunes.apple.com/lookup?id=1064216828&country=us" \
@@ -98,7 +86,7 @@ jobs:
             -H "Origin: $BASE" -H "Referer: $BASE/sign-in" \
             -X POST --data "$BODY" "$BASE/api/sign-in")
           echo "Login HTTP $CODE"
-          [ "$CODE" = "200" ] || { cat "$RUNNER_TEMP/login.txt" | head -c 300; echo; exit 1; }
+          [ "$CODE" = "200" ] || { head -c 300 "$RUNNER_TEMP/login.txt"; echo; exit 1; }
 
           echo "== 4. Session check"
           echo "Info HTTP $(curl -s -o /dev/null -w '%{http_code}' \
@@ -109,13 +97,13 @@ jobs:
             -A "$UA" -H "Cookie: cf_clearance=$CF" -b "$JAR" \
             -H "Referer: $BASE/" "$BASE/api/download/$APP_ID/$VER_ID")
           echo "Download endpoint HTTP $CODE"
-          [ "$CODE" = "200" ] || { cat "$RUNNER_TEMP/dl.txt" | head -c 300; echo; exit 1; }
+          [ "$CODE" = "200" ] || { head -c 300 "$RUNNER_TEMP/dl.txt"; echo; exit 1; }
           URL=$(jq -r 'if type=="string" then . else empty end' "$RUNNER_TEMP/dl.txt" 2>/dev/null \
             || cat "$RUNNER_TEMP/dl.txt")
           echo "::add-mask::$URL"
           echo "Link host: $(echo "$URL" | awk -F/ '{print $3}')"
 
           echo "== 6. First bytes"
-          MAGIC=$(curl -sL -A "$UA" -r 0-3 "$URL" | head -c 4 | xxd -p)
+          MAGIC=$(curl -sL -r 0-3 "$URL" | head -c 4 | xxd -p)
           echo "First bytes: $MAGIC (504b0304 = real IPA)"
-          echo "Size: $(curl -sIL -A "$UA" "$URL" | grep -i '^content-length' | tail -1)"
+          echo "Size: $(curl -sIL "$URL" | grep -i '^content-length' | tail -1)"
