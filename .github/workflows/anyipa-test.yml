@@ -18,7 +18,8 @@ jobs:
           ANYIPA_PASS: ${{ secrets.ANYIPA_PASS }}
         run: |
           set -u
-          OUTPUT=$(cd /tmp/pw && node $GITHUB_WORKSPACE/.github/scripts/cf.mjs 2>/tmp/cf.err || true)
+          cp $GITHUB_WORKSPACE/.github/scripts/cf.mjs /tmp/pw/cf.mjs
+          OUTPUT=$(cd /tmp/pw && node cf.mjs 2>/tmp/cf.err || true)
           cat /tmp/cf.err >&2
           UA=$(echo "$OUTPUT" | grep '^UA=' | cut -d= -f2-)
           CF=$(echo "$OUTPUT" | grep '^CF=' | cut -d= -f2-)
