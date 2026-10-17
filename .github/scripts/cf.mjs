@@ -102,8 +102,23 @@ if (dlResult.status !== 200) {
   process.exit(1);
 }
 
-// Strip surrounding quotes if the API returns a JSON string
 const url = dlResult.body.trim().replace(/^"|"$/g, '');
+
+// Verify first bytes using the browser session (URL requires auth cookies)
+log('Verifying IPA bytes...');
+const rangeResp = await ctx.request.get(url, {
+  headers: { 'Range': 'bytes=0-3' },
+  maxRedirects: 10,
+});
+log('Range HTTP ' + rangeResp.status());
+if (rangeResp.status() !== 200 && rangeResp.status() !== 206) {
+  log('Range request failed'); process.exit(1);
+}
+const magic = Buffer.from(await rangeResp.body()).toString('hex');
+log('First bytes: ' + magic);
+
+// Mask and output the URL for the workflow
 console.log('DOWNLOAD_URL=' + url);
+console.log('DOWNLOAD_MAGIC=' + magic);
 
 await browser.close();
