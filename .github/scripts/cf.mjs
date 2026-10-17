@@ -54,10 +54,14 @@ console.log('STATUS=' + entry.status);
 
 // 3. Fill and submit the login form (lets the site's own JS handle MD5 + POST)
 log('Loading sign-in page...');
-await page.goto(BASE + '/sign-in', { waitUntil: 'domcontentloaded', timeout: 20000 });
-try { await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 10000 }); } catch(e) {}
-log('Sign-in page title: ' + (await page.title()));
-log('Sign-in page HTML (first 500): ' + (await page.evaluate(() => document.body.innerHTML.slice(0, 500))));
+await page.goto(BASE + '/sign-in', { waitUntil: 'domcontentloaded', timeout: 30000 });
+try {
+  await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 25000 });
+  log('CF passed on sign-in page');
+} catch(e) {
+  log('CF still blocking sign-in page after 25s — giving up');
+  process.exit(1);
+}
 log('Filling form...');
 await page.locator('input[type="text"].form-control').fill(USER);
 await page.locator('input[type="password"].form-control').fill(PASS);
