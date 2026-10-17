@@ -14,9 +14,12 @@ jobs:
     steps:
       - name: Install curl-impersonate
         run: |
-          curl -sL https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-chrome.x86_64-linux-musl.tar.gz \
-            | tar -xz -C /usr/local/bin curl_chrome116
+          LATEST=$(curl -sL https://api.github.com/repos/lwthiker/curl-impersonate/releases/latest | jq -r '.tag_name')
+          echo "Latest release: $LATEST"
+          URL="https://github.com/lwthiker/curl-impersonate/releases/download/$LATEST/curl-impersonate-chrome.x86_64-linux-musl.tar.gz"
+          curl -sL "$URL" | tar -xz -C /usr/local/bin curl_chrome116
           chmod +x /usr/local/bin/curl_chrome116
+          curl_chrome116 --version
 
       - name: Test anyipa search, login and download
         env:
