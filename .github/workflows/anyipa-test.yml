@@ -10,7 +10,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Playwright
-        run: npm install --prefix /tmp/pw playwright
+        run: |
+          npm install --prefix /tmp/pw playwright
+          cd /tmp/pw && npx playwright install chromium --with-deps
 
       - name: Solve CF and test anyipa
         env:
