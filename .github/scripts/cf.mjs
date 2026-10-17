@@ -2,8 +2,11 @@
 // CF cannot challenge fetch() calls made from within the same browser context.
 // Outputs KEY=value lines to stdout; progress/debug to stderr.
 
-import { chromium } from 'playwright';
+import { chromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { createHash } from 'crypto';
+
+chromium.use(StealthPlugin());
 
 const BASE = 'https://anyipa.me';
 const USER = process.env.ANYIPA_USER;
@@ -58,34 +61,31 @@ log('Found: v' + entry.version + ' status=' + entry.status);
 console.log('VERSION=' + entry.version);
 console.log('STATUS=' + entry.status);
 
-// 3. Login via fetch from main page context (avoids navigating to /sign-in which CF blocks)
-log('Returning to main page for login fetch...');
-await page.goto(BASE + '/', { waitUntil: 'domcontentloaded', timeout: 20000 });
-log('Logging in...');
-const loginResult = await page.evaluate(async ({ base, user, pw }) => {
-  const r = await fetch(base + '/api/sign-in', {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: user, pw }),
-  });
-  return { status: r.status, body: await r.text() };
-}, { base: BASE, user: USER, pw: PASS_MD5 });
-log('Login HTTP ' + loginResult.status);
-if (loginResult.status !== 200) {
-  log('Login body: ' + loginResult.body.slice(0, 300));
+// 3. Login via sign-in page
+log('Loading sign-in page...');
+await page.goto(BASE + '/sign-in', { waitUntil: 'domcontentloaded', timeout: 30000 });
+try {
+  await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 45000 });
+  log('CF passed on sign-in page');
+} catch(e) {
+  log('CF still blocking sign-in page — title: ' + (await page.title()));
+  process.exit(1);
+}
+log('Filling form...');
+await page.locator('input[type="text"].form-control').fill(USER);
+await page.locator('input[type="password"].form-control').fill(PASS);
+log('Submitting...');
+const [loginResp] = await Promise.all([
+  page.waitForResponse(r => r.url().includes('/api/sign-in'), { timeout: 15000 }),
+  page.locator('button.btn-primary').click(),
+]);
+log('Login HTTP ' + loginResp.status());
+if (loginResp.status() !== 200) {
+  log('Login body: ' + (await loginResp.text()).slice(0, 300));
   process.exit(1);
 }
 
-// 4. Session check via navigation
-await page.goto(BASE + '/api/info', { waitUntil: 'domcontentloaded', timeout: 10000 });
-const infoText = await page.evaluate(() => document.body.innerText);
-log('Info response: ' + infoText.slice(0, 100));
-if (infoText.includes('Just a moment') || infoText.includes('Unauthorized') || infoText.includes('401')) {
-  log('Not logged in'); process.exit(1);
-}
-
-// 5. Download link
+// 4. Download link
 const APP_ID = entry.app_id;
 const VER_ID = entry.app_ver_id;
 log('Getting download link...');
