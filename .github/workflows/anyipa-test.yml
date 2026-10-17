@@ -15,7 +15,8 @@ jobs:
           set -u
 
           # --- Playwright script: solve CF, return UA + cf_clearance cookie ---
-          cat > /tmp/cf.mjs << 'EOF'
+          mkdir -p /tmp/pw
+          cat > /tmp/pw/cf.mjs << 'EOF'
           import { chromium } from 'playwright';
 
           const browser = await chromium.launch({
