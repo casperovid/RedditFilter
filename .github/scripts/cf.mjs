@@ -56,6 +56,8 @@ console.log('STATUS=' + entry.status);
 log('Loading sign-in page...');
 await page.goto(BASE + '/sign-in', { waitUntil: 'domcontentloaded', timeout: 20000 });
 try { await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 10000 }); } catch(e) {}
+log('Sign-in page title: ' + (await page.title()));
+log('Sign-in page HTML (first 500): ' + (await page.evaluate(() => document.body.innerHTML.slice(0, 500))));
 log('Filling form...');
 await page.locator('input[type="text"].form-control').fill(USER);
 await page.locator('input[type="password"].form-control').fill(PASS);
