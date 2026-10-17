@@ -107,7 +107,16 @@ const url = dlResult.body.trim().replace(/^"|"$/g, '');
 // DIAGNOSTIC: the link is an ouo.io shortlink. Open it and report what we land on (no URLs logged).
 log('Download URL host: ' + new URL(url).hostname);
 const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => { log('goto error: ' + e.message.split('\n')[0]); return null; });
-await page.waitForTimeout(8000);
+try {
+  await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 45000 });
+  log('CF passed on ouo.io');
+} catch (e) { log('CF still blocking ouo.io after 45s'); }
+await page.waitForTimeout(6000);
+log('ouo buttons/links: ' + JSON.stringify(await page.evaluate(() =>
+  Array.from(document.querySelectorAll('button, a, input[type=submit], form')).slice(0, 15).map(el => ({
+    tag: el.tagName, id: el.id, text: (el.innerText || el.value || '').trim().slice(0, 40), href: el.tagName === 'A' ? new URL(el.href, location.href).hostname : undefined
+  }))
+)));
 log('ouo status: ' + (resp ? resp.status() : 'none'));
 log('ouo final host: ' + new URL(page.url()).hostname);
 log('ouo title: ' + (await page.title()));
