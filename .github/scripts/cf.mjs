@@ -104,17 +104,19 @@ if (dlResult.status !== 200) {
 
 const url = dlResult.body.trim().replace(/^"|"$/g, '');
 
-// Verify first bytes using the browser session (URL requires auth cookies)
+// Verify first bytes using the page's fetch (has session cookies)
 log('Verifying IPA bytes...');
-const rangeResp = await ctx.request.get(url, {
-  headers: { 'Range': 'bytes=0-3' },
-  maxRedirects: 10,
-});
-log('Range HTTP ' + rangeResp.status());
-if (rangeResp.status() !== 200 && rangeResp.status() !== 206) {
+const rangeResult = await page.evaluate(async ({ u }) => {
+  const r = await fetch(u, { credentials: 'include', headers: { 'Range': 'bytes=0-3' } });
+  const buf = await r.arrayBuffer();
+  const bytes = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return { status: r.status, bytes };
+}, { u: url });
+log('Range HTTP ' + rangeResult.status);
+if (rangeResult.status !== 200 && rangeResult.status !== 206) {
   log('Range request failed'); process.exit(1);
 }
-const magic = Buffer.from(await rangeResp.body()).toString('hex');
+const magic = rangeResult.bytes;
 log('First bytes: ' + magic);
 
 // Mask and output the URL for the workflow
