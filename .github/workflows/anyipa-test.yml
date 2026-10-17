@@ -31,9 +31,9 @@ jobs:
             node cf.mjs 2>/tmp/cf.err || true)
           cat /tmp/cf.err >&2
 
-          VERSION=$(echo "$OUTPUT" | grep '^VERSION=' | cut -d= -f2-)
-          STATUS=$(echo  "$OUTPUT" | grep '^STATUS='  | cut -d= -f2-)
-          URL=$(echo     "$OUTPUT" | grep '^DOWNLOAD_URL=' | cut -d= -f2-)
+          VERSION=$(echo "$OUTPUT" | grep '^VERSION='     | cut -d= -f2- || true)
+          STATUS=$(echo  "$OUTPUT" | grep '^STATUS='      | cut -d= -f2- || true)
+          URL=$(echo     "$OUTPUT" | grep '^DOWNLOAD_URL=' | cut -d= -f2- || true)
 
           echo "anyipa version : ${VERSION:-MISSING}"
           echo "anyipa status  : ${STATUS:-MISSING}"
