@@ -1,0 +1,61 @@
+name: anyipa test
+
+# Manual test: can GitHub's servers log in to anyipa and get a download link
+# for the current Reddit IPA? Nothing is built or published.
+# Logs on a public repo are public, so this never prints the password,
+# the session cookie or the full download link.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test anyipa search, login and download
+        env:
+          ANYIPA_USER: ${{ secrets.ANYIPA_USER }}
+          ANYIPA_PASS: ${{ secrets.ANYIPA_PASS }}
+        run: |
+          set -u
+          UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+          JAR="$RUNNER_TEMP/cookies.txt"
+          BASE="https://anyipa.me"
+
+          echo "== 1. App Store version"
+          curl -s "https://itunes.apple.com/lookup?id=1064216828&country=us" \
+            | jq -r '.results[0] | "App Store: \(.version) released \(.currentVersionReleaseDate)"'
+
+          echo "== 2. anyipa search (no login)"
+          SEARCH=$(curl -s -A "$UA" "$BASE/api/search/us/reddit")
+          echo "$SEARCH" | jq -e 'type=="array"' >/dev/null || { echo "Search did not return JSON:"; echo "$SEARCH" | head -c 300; exit 1; }
+          ENTRY=$(echo "$SEARCH" | jq -c '[.[] | select(.app_id==1064216828)][0]')
+          echo "$ENTRY" | jq -r '"anyipa: \(.version) status \(.status)"'
+          APP_ID=$(echo "$ENTRY" | jq -r '.app_id')
+          VER_ID=$(echo "$ENTRY" | jq -r '.app_ver_id')
+
+          echo "== 3. Login"
+          PW_MD5=$(printf '%s' "$ANYIPA_PASS" | md5sum | cut -d' ' -f1)
+          BODY=$(jq -nc --arg id "$ANYIPA_USER" --arg pw "$PW_MD5" '{id:$id,pw:$pw}')
+          CODE=$(curl -s -o "$RUNNER_TEMP/login.txt" -w '%{http_code}' -A "$UA" -c "$JAR" -b "$JAR" \
+            -H 'Content-Type: application/json' -H "Origin: $BASE" -H "Referer: $BASE/sign-in" \
+            -X POST --data "$BODY" "$BASE/api/sign-in")
+          echo "Login HTTP $CODE"
+          [ "$CODE" = "200" ] || { echo "Login response:"; head -c 300 "$RUNNER_TEMP/login.txt"; echo; exit 1; }
+
+          echo "== 4. Session check"
+          echo "Info HTTP $(curl -s -o /dev/null -w '%{http_code}' -A "$UA" -b "$JAR" "$BASE/api/info")"
+
+          echo "== 5. Download link"
+          CODE=$(curl -s -o "$RUNNER_TEMP/dl.txt" -w '%{http_code}' -A "$UA" -b "$JAR" \
+            -H "Referer: $BASE/" "$BASE/api/download/$APP_ID/$VER_ID")
+          echo "Download endpoint HTTP $CODE"
+          [ "$CODE" = "200" ] || { echo "Response:"; head -c 300 "$RUNNER_TEMP/dl.txt"; echo; exit 1; }
+          URL=$(jq -r 'if type=="string" then . else empty end' "$RUNNER_TEMP/dl.txt" 2>/dev/null || cat "$RUNNER_TEMP/dl.txt")
+          echo "::add-mask::$URL"
+          echo "Link host: $(echo "$URL" | awk -F/ '{print $3}')"
+
+          echo "== 6. First bytes of the IPA (no cookies)"
+          MAGIC=$(curl -sL -A "$UA" -r 0-3 "$URL" | head -c 4 | xxd -p)
+          echo "First bytes: $MAGIC (504b0304 = a real zip/IPA)"
+          echo "Size: $(curl -sIL -A "$UA" "$URL" | grep -i '^content-length' | tail -1)"
