@@ -6,11 +6,11 @@ import { chromium } from 'playwright';
 
 const BASE = 'https://anyipa.me';
 const USER = process.env.ANYIPA_USER;
-const PW_MD5 = process.env.ANYIPA_PASS_MD5; // MD5 computed by caller
+const PASS = process.env.ANYIPA_PASS; // plain — site JS handles MD5 before POST
 
 function log(msg) { process.stderr.write(msg + '\n'); }
 
-if (!USER || !PW_MD5) { log('Missing ANYIPA_USER or ANYIPA_PASS_MD5'); process.exit(1); }
+if (!USER || !PASS) { log('Missing ANYIPA_USER or ANYIPA_PASS'); process.exit(1); }
 
 const browser = await chromium.launch({
   headless: true,
@@ -52,36 +52,32 @@ log('Found: v' + entry.version + ' status=' + entry.status);
 console.log('VERSION=' + entry.version);
 console.log('STATUS=' + entry.status);
 
-// 3. Navigate to sign-in page so CF clears that path, then login
+// 3. Fill and submit the login form (lets the site's own JS handle MD5 + POST)
 log('Loading sign-in page...');
 await page.goto(BASE + '/sign-in', { waitUntil: 'domcontentloaded', timeout: 20000 });
 try { await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 10000 }); } catch(e) {}
-log('Logging in...');
-const loginResult = await page.evaluate(async ({ base, user, pw }) => {
-  const r = await fetch(base + '/api/sign-in', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Origin': base,
-      'Referer': base + '/sign-in',
-    },
-    body: JSON.stringify({ id: user, pw: pw }),
-    credentials: 'include',
-  });
-  return { status: r.status, body: await r.text() };
-}, { base: BASE, user: USER, pw: PW_MD5 });
-log('Login HTTP ' + loginResult.status);
-if (loginResult.status !== 200) {
-  log('Login body: ' + loginResult.body.slice(0, 300));
+log('Filling form...');
+await page.locator('input[name="id"], input[type="email"], input[type="text"]').first().fill(USER);
+const pwField = page.locator('input[type="password"]').first();
+await pwField.fill(PASS);
+log('Submitting...');
+const [loginResp] = await Promise.all([
+  page.waitForResponse(r => r.url().includes('/api/sign-in'), { timeout: 15000 }),
+  pwField.press('Enter'),
+]);
+log('Login HTTP ' + loginResp.status());
+if (loginResp.status() !== 200) {
+  log('Login body: ' + (await loginResp.text()).slice(0, 300));
   process.exit(1);
 }
 
-// 4. Session check
-const infoStatus = await page.evaluate(async ({ base }) => {
-  const r = await fetch(base + '/api/info', { credentials: 'include' });
-  return r.status;
-}, { base: BASE });
-log('Info HTTP ' + infoStatus);
+// 4. Session check via navigation
+await page.goto(BASE + '/api/info', { waitUntil: 'domcontentloaded', timeout: 10000 });
+const infoText = await page.evaluate(() => document.body.innerText);
+log('Info response: ' + infoText.slice(0, 100));
+if (infoText.includes('Just a moment') || infoText.includes('Unauthorized') || infoText.includes('401')) {
+  log('Not logged in'); process.exit(1);
+}
 
 // 5. Download link
 const APP_ID = entry.app_id;
