@@ -16,8 +16,9 @@ jobs:
         run: |
           LATEST=$(curl -sL https://api.github.com/repos/lwthiker/curl-impersonate/releases/latest | jq -r '.tag_name')
           echo "Latest release: $LATEST"
-          URL="https://github.com/lwthiker/curl-impersonate/releases/download/$LATEST/curl-impersonate-chrome.x86_64-linux-musl.tar.gz"
-          curl -sL "$URL" | tar -xz -C /usr/local/bin curl_chrome116
+          URL="https://github.com/lwthiker/curl-impersonate/releases/download/$LATEST/curl-impersonate-${LATEST}.x86_64-linux-gnu.tar.gz"
+          curl -sL "$URL" -o /tmp/ci.tar.gz
+          tar -xz -C /usr/local/bin -f /tmp/ci.tar.gz curl_chrome116
           chmod +x /usr/local/bin/curl_chrome116
           curl_chrome116 --version
 
