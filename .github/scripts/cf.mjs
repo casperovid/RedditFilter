@@ -52,7 +52,10 @@ log('Found: v' + entry.version + ' status=' + entry.status);
 console.log('VERSION=' + entry.version);
 console.log('STATUS=' + entry.status);
 
-// 3. Login via fetch inside the browser (shares CF-cleared session)
+// 3. Navigate to sign-in page so CF clears that path, then login
+log('Loading sign-in page...');
+await page.goto(BASE + '/sign-in', { waitUntil: 'domcontentloaded', timeout: 20000 });
+try { await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 10000 }); } catch(e) {}
 log('Logging in...');
 const loginResult = await page.evaluate(async ({ base, user, pw }) => {
   const r = await fetch(base + '/api/sign-in', {
