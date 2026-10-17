@@ -104,24 +104,14 @@ if (dlResult.status !== 200) {
 
 const url = dlResult.body.trim().replace(/^"|"$/g, '');
 
-// Verify first bytes using the page's fetch (has session cookies)
-log('Verifying IPA bytes...');
+// DIAGNOSTIC: the link is an ouo.io shortlink. Open it and report what we land on (no URLs logged).
 log('Download URL host: ' + new URL(url).hostname);
-const rangeResult = await page.evaluate(async ({ u }) => {
-  const r = await fetch(u, { headers: { 'Range': 'bytes=0-3' } });
-  const buf = await r.arrayBuffer();
-  const bytes = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-  return { status: r.status, bytes };
-}, { u: url });
-log('Range HTTP ' + rangeResult.status);
-if (rangeResult.status !== 200 && rangeResult.status !== 206) {
-  log('Range request failed'); process.exit(1);
-}
-const magic = rangeResult.bytes;
-log('First bytes: ' + magic);
-
-// Mask and output the URL for the workflow
-console.log('DOWNLOAD_URL=' + url);
-console.log('DOWNLOAD_MAGIC=' + magic);
-
+const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => { log('goto error: ' + e.message.split('\n')[0]); return null; });
+await page.waitForTimeout(8000);
+log('ouo status: ' + (resp ? resp.status() : 'none'));
+log('ouo final host: ' + new URL(page.url()).hostname);
+log('ouo title: ' + (await page.title()));
+log('ouo page text (first 300): ' + (await page.evaluate(() => document.body.innerText.slice(0, 300).replace(/\s+/g, ' '))));
+log('ouo has captcha iframe/widget: ' + (await page.evaluate(() => !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="turnstile"], iframe[src*="hcaptcha"], .g-recaptcha, .cf-turnstile'))));
 await browser.close();
+process.exit(1);
