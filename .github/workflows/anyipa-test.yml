@@ -7,42 +7,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Write Playwright script
-        run: |
-          mkdir -p /tmp/pw
-          python3 -c "
-          import textwrap, pathlib
-          js = textwrap.dedent('''
-            import { chromium } from \"playwright\";
-            const browser = await chromium.launch({
-              headless: true,
-              args: [\"--disable-blink-features=AutomationControlled\",\"--no-sandbox\",\"--disable-dev-shm-usage\"],
-            });
-            const ctx = await browser.newContext({
-              userAgent: \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\",
-            });
-            await ctx.addInitScript(() => {
-              Object.defineProperty(navigator, \"webdriver\", { get: () => undefined });
-            });
-            const page = await ctx.newPage();
-            process.stderr.write(\"Opening anyipa.me...\\n\");
-            await page.goto(\"https://anyipa.me/\", { waitUntil: \"domcontentloaded\", timeout: 30000 });
-            try {
-              await page.waitForFunction(() => !document.title.includes(\"Just a moment\"), { timeout: 25000 });
-              process.stderr.write(\"CF passed\\n\");
-            } catch(e) {
-              process.stderr.write(\"CF title: \" + await page.title() + \"\\n\");
-            }
-            const cookies = await ctx.cookies(\"https://anyipa.me\");
-            const cf = cookies.find(c => c.name === \"cf_clearance\");
-            const ua = await page.evaluate(() => navigator.userAgent);
-            console.log(\"UA=\" + ua);
-            console.log(\"CF=\" + (cf ? cf.value : \"\"));
-            await browser.close();
-          ''').strip()
-          pathlib.Path('/tmp/pw/cf.mjs').write_text(js)
-          print('wrote cf.mjs')
-          "
+      - uses: actions/checkout@v4
 
       - name: Install Playwright
         run: npm install --prefix /tmp/pw playwright
@@ -53,7 +18,7 @@ jobs:
           ANYIPA_PASS: ${{ secrets.ANYIPA_PASS }}
         run: |
           set -u
-          OUTPUT=$(cd /tmp/pw && node cf.mjs 2>/tmp/cf.err || true)
+          OUTPUT=$(cd /tmp/pw && node $GITHUB_WORKSPACE/.github/scripts/cf.mjs 2>/tmp/cf.err || true)
           cat /tmp/cf.err >&2
           UA=$(echo "$OUTPUT" | grep '^UA=' | cut -d= -f2-)
           CF=$(echo "$OUTPUT" | grep '^CF=' | cut -d= -f2-)
