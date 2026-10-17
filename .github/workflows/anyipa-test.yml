@@ -14,64 +14,40 @@ jobs:
           npm install --prefix /tmp/pw playwright
           cd /tmp/pw && npx playwright install chromium --with-deps
 
-      - name: Solve CF and test anyipa
+      - name: Run anyipa via Playwright
         env:
           ANYIPA_USER: ${{ secrets.ANYIPA_USER }}
           ANYIPA_PASS: ${{ secrets.ANYIPA_PASS }}
         run: |
-          set -u
+          set -euo pipefail
+
+          # Compute MD5 of password here; never print the raw password
+          PW_MD5=$(printf '%s' "$ANYIPA_PASS" | md5sum | cut -d' ' -f1)
+
           cp $GITHUB_WORKSPACE/.github/scripts/cf.mjs /tmp/pw/cf.mjs
-          OUTPUT=$(cd /tmp/pw && node cf.mjs 2>/tmp/cf.err || true)
+
+          OUTPUT=$(cd /tmp/pw && \
+            ANYIPA_USER="$ANYIPA_USER" ANYIPA_PASS_MD5="$PW_MD5" \
+            node cf.mjs 2>/tmp/cf.err || true)
           cat /tmp/cf.err >&2
-          UA=$(echo "$OUTPUT" | grep '^UA=' | cut -d= -f2-)
-          CF=$(echo "$OUTPUT" | grep '^CF=' | cut -d= -f2-)
-          echo "UA prefix: ${UA:0:60}"
-          [ -n "$CF" ] && echo "cf_clearance: obtained" || echo "cf_clearance: MISSING"
 
-          JAR="$RUNNER_TEMP/cookies.txt"
-          BASE="https://anyipa.me"
+          VERSION=$(echo "$OUTPUT" | grep '^VERSION=' | cut -d= -f2-)
+          STATUS=$(echo  "$OUTPUT" | grep '^STATUS='  | cut -d= -f2-)
+          URL=$(echo     "$OUTPUT" | grep '^DOWNLOAD_URL=' | cut -d= -f2-)
 
-          echo "== 1. App Store version"
+          echo "anyipa version : ${VERSION:-MISSING}"
+          echo "anyipa status  : ${STATUS:-MISSING}"
+          [ -n "$URL" ] && echo "download URL   : obtained" || { echo "download URL   : MISSING"; exit 1; }
+
+          echo "::add-mask::$URL"
+
+          echo "== App Store version"
           curl -s "https://itunes.apple.com/lookup?id=1064216828&country=us" \
             | jq -r '.results[0] | "App Store: \(.version) released \(.currentVersionReleaseDate)"'
 
-          echo "== 2. anyipa search"
-          SEARCH=$(curl -s -A "$UA" -H "Cookie: cf_clearance=$CF" "$BASE/api/search/us/reddit")
-          echo "$SEARCH" | jq -e 'type=="array"' >/dev/null \
-            || { echo "Search failed:"; echo "$SEARCH" | head -c 300; exit 1; }
-          ENTRY=$(echo "$SEARCH" | jq -c '[.[] | select(.app_id==1064216828)][0]')
-          echo "$ENTRY" | jq -r '"anyipa: \(.version) status \(.status)"'
-          APP_ID=$(echo "$ENTRY" | jq -r '.app_id')
-          VER_ID=$(echo "$ENTRY" | jq -r '.app_ver_id')
+          echo "== IPA first bytes (504b0304 = valid zip/IPA)"
+          MAGIC=$(curl -sfL -r 0-3 "$URL" | xxd -p)
+          echo "First bytes: $MAGIC"
 
-          echo "== 3. Login"
-          PW_MD5=$(printf '%s' "$ANYIPA_PASS" | md5sum | cut -d' ' -f1)
-          BODY=$(jq -nc --arg id "$ANYIPA_USER" --arg pw "$PW_MD5" '{id:$id,pw:$pw}')
-          CODE=$(curl -s -o "$RUNNER_TEMP/login.txt" -w '%{http_code}' \
-            -A "$UA" -H "Cookie: cf_clearance=$CF" \
-            -c "$JAR" -b "$JAR" \
-            -H 'Content-Type: application/json' \
-            -H "Origin: $BASE" -H "Referer: $BASE/sign-in" \
-            -X POST --data "$BODY" "$BASE/api/sign-in")
-          echo "Login HTTP $CODE"
-          [ "$CODE" = "200" ] || { head -c 300 "$RUNNER_TEMP/login.txt"; echo; exit 1; }
-
-          echo "== 4. Session check"
-          echo "Info HTTP $(curl -s -o /dev/null -w '%{http_code}' \
-            -A "$UA" -H "Cookie: cf_clearance=$CF" -b "$JAR" "$BASE/api/info")"
-
-          echo "== 5. Download link"
-          CODE=$(curl -s -o "$RUNNER_TEMP/dl.txt" -w '%{http_code}' \
-            -A "$UA" -H "Cookie: cf_clearance=$CF" -b "$JAR" \
-            -H "Referer: $BASE/" "$BASE/api/download/$APP_ID/$VER_ID")
-          echo "Download endpoint HTTP $CODE"
-          [ "$CODE" = "200" ] || { head -c 300 "$RUNNER_TEMP/dl.txt"; echo; exit 1; }
-          URL=$(jq -r 'if type=="string" then . else empty end' "$RUNNER_TEMP/dl.txt" 2>/dev/null \
-            || cat "$RUNNER_TEMP/dl.txt")
-          echo "::add-mask::$URL"
-          echo "Link host: $(echo "$URL" | awk -F/ '{print $3}')"
-
-          echo "== 6. First bytes"
-          MAGIC=$(curl -sL -r 0-3 "$URL" | head -c 4 | xxd -p)
-          echo "First bytes: $MAGIC (504b0304 = real IPA)"
-          echo "Size: $(curl -sIL "$URL" | grep -i '^content-length' | tail -1)"
+          echo "== Content-Length"
+          curl -sIL "$URL" | grep -i '^content-length' | tail -1
