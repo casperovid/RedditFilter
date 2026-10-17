@@ -31,6 +31,7 @@ jobs:
             xvfb-run -a --server-args="-screen 0 1280x800x24" node cf.mjs 2>/tmp/cf.err) || RC=$?
           echo "node exit code: $RC"
           cat /tmp/cf.err >&2
+          echo "$OUTPUT" | grep -v '^DOWNLOAD_' >&2 || true
 
           VERSION=$(echo "$OUTPUT" | grep '^VERSION='      | cut -d= -f2- || true)
           STATUS=$(echo  "$OUTPUT" | grep '^STATUS='       | cut -d= -f2- || true)
