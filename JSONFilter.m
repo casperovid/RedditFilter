@@ -72,7 +72,10 @@ static BOOL RFIsHomeRecommendation(id context) {
   if (!typeName || !typeId) return NO;
   BOOL popularFiller = [typeName isEqualToString:@"PopularRecommendationContext"] ||
                        [typeId hasPrefix:@"global_popular"];
-  return !popularFiller;
+  // Posts from the user's own subscriptions also carry a context, e.g.
+  // DefaultRecommendationContext / subscribed_personalized_sort. Not a recommendation.
+  BOOL subscribed = [typeId hasPrefix:@"subscribed"];
+  return !popularFiller && !subscribed;
 }
 
 // Returns YES if it changed anything.
