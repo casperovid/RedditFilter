@@ -11,7 +11,7 @@ jobs:
 
       - name: Install Playwright
         run: |
-          npm install --prefix /tmp/pw playwright
+          npm install --prefix /tmp/pw playwright playwright-extra puppeteer-extra-plugin-stealth
           cd /tmp/pw && npx playwright install chromium --with-deps
 
       - name: Run anyipa via Playwright
