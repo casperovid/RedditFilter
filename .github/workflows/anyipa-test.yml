@@ -43,8 +43,15 @@ jobs:
             | jq -r '.results[0] | "App Store: \(.version) released \(.currentVersionReleaseDate)"'
 
           echo "== IPA first bytes (504b0304 = valid zip/IPA)"
-          MAGIC=$(curl -sfL -r 0-3 "$URL" | xxd -p)
-          echo "First bytes: $MAGIC"
+          HTTP_CODE=$(curl -sL -r 0-3 -o /tmp/ipa_start.bin -w "%{http_code}" "$URL")
+          echo "Download HTTP: $HTTP_CODE"
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "206" ]; then
+            MAGIC=$(xxd -p /tmp/ipa_start.bin)
+            echo "First bytes: $MAGIC"
+          else
+            echo "Download failed"
+            exit 1
+          fi
 
           echo "== Content-Length"
           curl -sIL "$URL" | grep -i '^content-length' | tail -1
