@@ -57,13 +57,12 @@ log('Loading sign-in page...');
 await page.goto(BASE + '/sign-in', { waitUntil: 'domcontentloaded', timeout: 20000 });
 try { await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 10000 }); } catch(e) {}
 log('Filling form...');
-await page.locator('input[name="id"], input[type="email"], input[type="text"]').first().fill(USER);
-const pwField = page.locator('input[type="password"]').first();
-await pwField.fill(PASS);
+await page.locator('input[type="text"].form-control').fill(USER);
+await page.locator('input[type="password"].form-control').fill(PASS);
 log('Submitting...');
 const [loginResp] = await Promise.all([
   page.waitForResponse(r => r.url().includes('/api/sign-in'), { timeout: 15000 }),
-  pwField.press('Enter'),
+  page.locator('button.btn-primary').click(),
 ]);
 log('Login HTTP ' + loginResp.status());
 if (loginResp.status() !== 200) {
