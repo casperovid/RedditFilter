@@ -25,7 +25,7 @@ jobs:
 
           OUTPUT=$(cd /tmp/pw && \
             ANYIPA_USER="$ANYIPA_USER" ANYIPA_PASS="$ANYIPA_PASS" \
-            node cf.mjs 2>/tmp/cf.err || true)
+            xvfb-run -a --server-args="-screen 0 1280x800x24" node cf.mjs 2>/tmp/cf.err || true)
           cat /tmp/cf.err >&2
 
           VERSION=$(echo "$OUTPUT" | grep '^VERSION='      | cut -d= -f2- || true)
