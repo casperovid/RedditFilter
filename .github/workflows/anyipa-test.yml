@@ -28,9 +28,10 @@ jobs:
             node cf.mjs 2>/tmp/cf.err || true)
           cat /tmp/cf.err >&2
 
-          VERSION=$(echo "$OUTPUT" | grep '^VERSION='     | cut -d= -f2- || true)
-          STATUS=$(echo  "$OUTPUT" | grep '^STATUS='      | cut -d= -f2- || true)
+          VERSION=$(echo "$OUTPUT" | grep '^VERSION='      | cut -d= -f2- || true)
+          STATUS=$(echo  "$OUTPUT" | grep '^STATUS='       | cut -d= -f2- || true)
           URL=$(echo     "$OUTPUT" | grep '^DOWNLOAD_URL=' | cut -d= -f2- || true)
+          MAGIC=$(echo   "$OUTPUT" | grep '^DOWNLOAD_MAGIC=' | cut -d= -f2- || true)
 
           echo "anyipa version : ${VERSION:-MISSING}"
           echo "anyipa status  : ${STATUS:-MISSING}"
@@ -43,15 +44,5 @@ jobs:
             | jq -r '.results[0] | "App Store: \(.version) released \(.currentVersionReleaseDate)"'
 
           echo "== IPA first bytes (504b0304 = valid zip/IPA)"
-          HTTP_CODE=$(curl -sL -r 0-3 -o /tmp/ipa_start.bin -w "%{http_code}" "$URL")
-          echo "Download HTTP: $HTTP_CODE"
-          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "206" ]; then
-            MAGIC=$(xxd -p /tmp/ipa_start.bin)
-            echo "First bytes: $MAGIC"
-          else
-            echo "Download failed"
-            exit 1
-          fi
-
-          echo "== Content-Length"
-          curl -sIL "$URL" | grep -i '^content-length' | tail -1
+          echo "First bytes: ${MAGIC:-MISSING}"
+          [ "${MAGIC:-}" = "504b0304" ] || { echo "Invalid IPA magic"; exit 1; }
