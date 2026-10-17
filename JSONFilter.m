@@ -8,6 +8,7 @@
 
 #import "JSONFilter.h"
 #import "DebugMenu.h"
+#import <os/log.h>
 
 static NSString *const kAutoModAccountId = @"t2_6l4z3";
 
@@ -63,7 +64,7 @@ static BOOL RFIsHomeRecommendation(id context) {
     @synchronized(seen) {
       if (![seen containsObject:key]) {
         [seen addObject:key];
-        NSLog(@"[RFRec] %@", key);
+        os_log(OS_LOG_DEFAULT, "[RFRec] %{public}@", key);
       }
     }
   }
@@ -203,7 +204,10 @@ static BOOL RFFilterGeneric(NSDictionary *payload, const RFContext *ctx) {
 
     // Feeds: <root>.<any key>.edges. Every key is checked because dictionary
     // order is random and nearly every object also has a __typename key.
-    for (id child in dict.allValues) changed |= RFFilterEdges(RFArray(RFDict(child)[@"edges"]), ctx);
+    for (id child in dict.allValues) {
+      NSArray *edges = RFArray(RFDict(child)[@"edges"]);
+      changed |= RFDropEmptiedEdges(edges, RFFilterEdges(edges, ctx));
+    }
 
     // Comments: <root>.commentForest.trees
     changed |= RFFilterEdges(RFArray(RFValueAtPath(dict, @"commentForest.trees")), ctx);
