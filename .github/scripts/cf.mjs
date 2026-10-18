@@ -6,33 +6,6 @@ chromium.use(StealthPlugin());
 const USER = process.env.ANYIPA_USER;
 const PASS = process.env.ANYIPA_PASS;
 
-const TIER_KEY = /(type|level|plan|role|status|tier|vip|group|class|premium|free|quota|limit|count|point|credit|balance|left|remain|expire|until|allow)/i;
-
-function describe(v, key = '', depth = 0) {
-  if (v === null) return 'null';
-  if (Array.isArray(v)) {
-    return `array(${v.length})` + (v.length && depth < 4 ? ` of ${describe(v[0], key, depth + 1)}` : '');
-  }
-  const t = typeof v;
-  if (t === 'boolean') return `boolean=${v}`;
-  if (t === 'number') return TIER_KEY.test(key) ? `number=${v}` : 'number';
-  if (t === 'string') return TIER_KEY.test(key) && v.length <= 20 ? `string="${v}"` : `string(len ${v.length})`;
-  if (t === 'object') {
-    if (depth >= 4) return 'object{…}';
-    const entries = Object.entries(v).slice(0, 40);
-    return '{ ' + entries.map(([k, x]) => `${k}: ${describe(x, k, depth + 1)}`).join(', ') + ' }';
-  }
-  return t;
-}
-
-function describeText(text) {
-  try {
-    return describe(JSON.parse(text));
-  } catch {
-    return `text(len ${text.length})`;
-  }
-}
-
 async function main() {
   if (!USER || !PASS) throw new Error('ANYIPA_USER / ANYIPA_PASS not set');
 
@@ -48,16 +21,14 @@ async function main() {
     });
     const page = await ctx.newPage();
 
-    const seen = [];
+    // Capture the sign-in response body so we can compare it to auth.grade
+    let signInBody = null;
     page.on('response', async res => {
       try {
         const u = new URL(res.url());
-        if (u.hostname !== 'anyipa.me' || !u.pathname.startsWith('/api/')) return;
-        const text = await res.text().catch(() => '');
-        const shape = u.pathname.startsWith('/api/search/')
-          ? `(search, len ${text.length})`
-          : describeText(text);
-        seen.push(`${res.request().method()} ${u.pathname.replace(/\d{6,}/g, '<n>')} → ${res.status()} ${shape}`);
+        if (u.hostname === 'anyipa.me' && u.pathname === '/api/sign-in') {
+          signInBody = (await res.text()).trim();
+        }
       } catch { /* ignore */ }
     });
 
@@ -67,30 +38,45 @@ async function main() {
     await page.fill('input[type="password"].form-control', PASS);
     await page.click('button.btn-primary');
     await page.waitForURL(/anyipa\.me\/?$/, { timeout: 30_000 });
-    await page.waitForTimeout(8_000);
+    await page.waitForTimeout(5_000);
     console.log('→ signed in');
 
-    console.log('→ /api/ responses (shape only, no /api/download made):');
-    for (const line of seen) console.log('   ' + line);
+    // grade from saved app state
+    const grade = await page.evaluate(() => {
+      try {
+        const top = JSON.parse(localStorage.getItem('persist:anyipa'));
+        return JSON.parse(top.auth).grade;
+      } catch { return null; }
+    });
+    console.log(`→ auth.grade = ${grade}`);
+    console.log(`→ sign-in response equals auth.grade: ${signInBody !== null && String(grade) === signInBody}`);
 
-    // Saved app state: parse redux-persist style values, print shape only
-    const persisted = await page.evaluate(() => localStorage.getItem('persist:anyipa'));
-    if (!persisted) {
-      console.log('→ persist:anyipa is empty');
-    } else {
-      console.log('→ persist:anyipa shape:');
-      let top;
-      try { top = JSON.parse(persisted); } catch { top = null; }
-      if (!top) {
-        console.log(`   not JSON (len ${persisted.length})`);
-      } else {
-        for (const [k, raw] of Object.entries(top)) {
-          let parsed = raw;
-          try { parsed = JSON.parse(raw); } catch { /* keep raw */ }
-          console.log(`   ${k}: ${describe(parsed, k)}`);
+    // Reddit entry fields + premium distribution (GET only, no /api/download)
+    const info = await page.evaluate(async () => {
+      const search = await fetch('/api/search/us/reddit').then(r => r.json());
+      const latest = await fetch('/api/latest/0').then(r => r.json());
+      const reddit = search.find(e => +e.app_id === 1064216828);
+      const pick = {};
+      if (reddit) {
+        for (const [k, v] of Object.entries(reddit)) {
+          if (k === 'RequestIP' || k === 'RequestUA') continue;
+          if (typeof v === 'boolean') pick[k] = v;
+          else if (typeof v === 'string' && v.length <= 10 && !/[:\/]/.test(v)) pick[k] = v;
         }
       }
-    }
+      return {
+        searchCount: search.length,
+        reddit: pick,
+        latestPremiumTrue: latest.filter(e => e.premium === true).length,
+        latestPremiumFalse: latest.filter(e => e.premium === false).length,
+        latestTotal: latest.length,
+        searchPremiumTrue: search.filter(e => e.premium === true).length,
+        searchPremiumFalse: search.filter(e => e.premium === false).length,
+      };
+    });
+    console.log(`→ search results: ${info.searchCount}  (premium true=${info.searchPremiumTrue}, false=${info.searchPremiumFalse})`);
+    console.log(`→ latest/0: ${info.latestTotal}  (premium true=${info.latestPremiumTrue}, false=${info.latestPremiumFalse})`);
+    console.log('→ Reddit entry (short fields only): ' + JSON.stringify(info.reddit));
   } finally {
     await browser.close();
   }
