@@ -6,19 +6,31 @@ chromium.use(StealthPlugin());
 const USER = process.env.ANYIPA_USER;
 const PASS = process.env.ANYIPA_PASS;
 
-const TIER_KEY = /(type|level|plan|role|status|tier|vip|group|class|premium|free|quota|limit|count|point|credit|balance|left|remain)/i;
+const TIER_KEY = /(type|level|plan|role|status|tier|vip|group|class|premium|free|quota|limit|count|point|credit|balance|left|remain|expire|until|allow)/i;
 
 function describe(v, key = '', depth = 0) {
   if (v === null) return 'null';
-  if (Array.isArray(v)) return `array(${v.length})` + (v.length && depth < 3 ? ` of ${describe(v[0], key, depth + 1)}` : '');
+  if (Array.isArray(v)) {
+    return `array(${v.length})` + (v.length && depth < 4 ? ` of ${describe(v[0], key, depth + 1)}` : '');
+  }
   const t = typeof v;
-  if (t === 'boolean' || t === 'number') return `${t}=${v}`;
+  if (t === 'boolean') return `boolean=${v}`;
+  if (t === 'number') return TIER_KEY.test(key) ? `number=${v}` : 'number';
   if (t === 'string') return TIER_KEY.test(key) && v.length <= 20 ? `string="${v}"` : `string(len ${v.length})`;
   if (t === 'object') {
-    if (depth >= 3) return 'object{…}';
-    return '{ ' + Object.entries(v).map(([k, x]) => `${k}: ${describe(x, k, depth + 1)}`).join(', ') + ' }';
+    if (depth >= 4) return 'object{…}';
+    const entries = Object.entries(v).slice(0, 40);
+    return '{ ' + entries.map(([k, x]) => `${k}: ${describe(x, k, depth + 1)}`).join(', ') + ' }';
   }
   return t;
+}
+
+function describeText(text) {
+  try {
+    return describe(JSON.parse(text));
+  } catch {
+    return `text(len ${text.length})`;
+  }
 }
 
 async function main() {
@@ -41,19 +53,11 @@ async function main() {
       try {
         const u = new URL(res.url());
         if (u.hostname !== 'anyipa.me' || !u.pathname.startsWith('/api/')) return;
-        const req = res.request();
-        let shape = '';
-        const ct = res.headers()['content-type'] || '';
-        if (ct.includes('json')) {
-          const body = await res.json().catch(() => null);
-          // Search results are large and already known; only describe the rest
-          shape = u.pathname.startsWith('/api/search/')
-            ? `(search, ${Array.isArray(body) ? body.length : '?'} entries)`
-            : describe(body);
-        } else {
-          shape = `(${ct || 'no content-type'})`;
-        }
-        seen.push(`${req.method()} ${u.pathname.replace(/\d{6,}/g, '<n>')} → ${res.status()} ${shape}`);
+        const text = await res.text().catch(() => '');
+        const shape = u.pathname.startsWith('/api/search/')
+          ? `(search, len ${text.length})`
+          : describeText(text);
+        seen.push(`${res.request().method()} ${u.pathname.replace(/\d{6,}/g, '<n>')} → ${res.status()} ${shape}`);
       } catch { /* ignore */ }
     });
 
@@ -66,20 +70,27 @@ async function main() {
     await page.waitForTimeout(8_000);
     console.log('→ signed in');
 
-    console.log('→ /api/ calls seen (no /api/download made):');
+    console.log('→ /api/ responses (shape only, no /api/download made):');
     for (const line of seen) console.log('   ' + line);
 
-    // Cookie NAMES only, never values
-    const cookies = await ctx.cookies(['https://anyipa.me']);
-    console.log('→ cookie names: ' + cookies.map(c => c.name).join(', '));
-
-    // Non-secret storage keys the app keeps, names only
-    const keys = await page.evaluate(() => ({
-      local: Object.keys(localStorage),
-      session: Object.keys(sessionStorage),
-    }));
-    console.log('→ localStorage keys: ' + keys.local.join(', '));
-    console.log('→ sessionStorage keys: ' + keys.session.join(', '));
+    // Saved app state: parse redux-persist style values, print shape only
+    const persisted = await page.evaluate(() => localStorage.getItem('persist:anyipa'));
+    if (!persisted) {
+      console.log('→ persist:anyipa is empty');
+    } else {
+      console.log('→ persist:anyipa shape:');
+      let top;
+      try { top = JSON.parse(persisted); } catch { top = null; }
+      if (!top) {
+        console.log(`   not JSON (len ${persisted.length})`);
+      } else {
+        for (const [k, raw] of Object.entries(top)) {
+          let parsed = raw;
+          try { parsed = JSON.parse(raw); } catch { /* keep raw */ }
+          console.log(`   ${k}: ${describe(parsed, k)}`);
+        }
+      }
+    }
   } finally {
     await browser.close();
   }
