@@ -1,177 +1,193 @@
-// All anyipa interactions run inside the Playwright browser session.
-// CF cannot challenge fetch() calls made from within the same browser context.
-// Outputs KEY=value lines to stdout; progress/debug to stderr.
-
 import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { createHash } from 'crypto';
+import { spawnSync } from 'child_process';
+import fs from 'fs';
+import https from 'https';
 
 chromium.use(StealthPlugin());
 
-const BASE = 'https://anyipa.me';
 const USER = process.env.ANYIPA_USER;
 const PASS = process.env.ANYIPA_PASS;
-const WORKER_URL = process.env.OUO_WORKER_URL;
-const WORKER_SECRET = process.env.OUO_WORKER_SECRET;
-const PASS_MD5 = PASS ? createHash('md5').update(PASS).digest('hex') : null;
+const OUT  = process.env.IPA_OUTPUT || '/tmp/reddit.ipa';
 
-function log(msg) { process.stderr.write(msg + '\n'); }
+async function main() {
+  if (!USER || !PASS) throw new Error('ANYIPA_USER / ANYIPA_PASS not set');
 
-if (!USER || !PASS) { log('Missing ANYIPA_USER or ANYIPA_PASS'); process.exit(1); }
-if (!WORKER_URL || !WORKER_SECRET) { log('Missing OUO_WORKER_URL or OUO_WORKER_SECRET'); process.exit(1); }
-
-const browser = await chromium.launch({
-  headless: false, // run under xvfb in CI; headed looks far less like a bot
-  args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'],
-});
-const ctx = await browser.newContext({
-  userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-  viewport: { width: 1280, height: 800 },
-  locale: 'en-US',
-  timezoneId: 'America/New_York',
-  colorScheme: 'light',
-});
-await ctx.addInitScript(() => {
-  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-});
-const page = await ctx.newPage();
-
-// 1. Land on main page to clear CF challenge
-log('Opening anyipa.me...');
-await page.goto(BASE + '/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-try {
-  await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 25000 });
-  log('CF passed');
-} catch (e) {
-  log('CF timeout, title: ' + (await page.title()));
-}
-
-// 2. Search — navigate so the page's own CF cookies are sent
-log('Searching for Reddit...');
-await page.goto(BASE + '/api/search/us/reddit', { waitUntil: 'domcontentloaded', timeout: 20000 });
-try { await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 10000 }); } catch(e) {}
-const searchText = await page.evaluate(() => document.body.innerText);
-let entry;
-try {
-  const results = JSON.parse(searchText);
-  entry = results.find(r => Number(r.app_id) === 1064216828);
-} catch (e) {
-  log('Search parse error: ' + searchText.slice(0, 300));
-  process.exit(1);
-}
-if (!entry) { log('Reddit not found in results'); process.exit(1); }
-log('Found: v' + entry.version + ' status=' + entry.status);
-console.log('VERSION=' + entry.version);
-console.log('STATUS=' + entry.status);
-
-// 3. Login via sign-in page
-log('Loading sign-in page...');
-await page.goto(BASE + '/sign-in', { waitUntil: 'domcontentloaded', timeout: 30000 });
-try {
-  await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 45000 });
-  log('CF passed on sign-in page');
-} catch(e) {
-  log('CF still blocking sign-in page — title: ' + (await page.title()));
-  process.exit(1);
-}
-log('Filling form...');
-await page.locator('input[type="text"].form-control').fill(USER);
-await page.locator('input[type="password"].form-control').fill(PASS);
-log('Submitting...');
-const [loginResp] = await Promise.all([
-  page.waitForResponse(r => r.url().includes('/api/sign-in'), { timeout: 15000 }),
-  page.locator('button.btn-primary').click(),
-]);
-log('Login HTTP ' + loginResp.status());
-if (loginResp.status() !== 200) {
-  log('Login body: ' + (await loginResp.text()).slice(0, 300));
-  process.exit(1);
-}
-
-// 4. Download link
-const APP_ID = entry.app_id;
-const VER_ID = entry.app_ver_id;
-log('Getting download link...');
-const dlResult = await page.evaluate(async ({ base, appId, verId }) => {
-  const r = await fetch(base + '/api/download/' + appId + '/' + verId, {
-    credentials: 'include',
-    headers: { 'Referer': base + '/' },
+  const browser = await chromium.launch({
+    headless: false,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
-  return { status: r.status, body: await r.text() };
-}, { base: BASE, appId: APP_ID, verId: VER_ID });
-log('Download HTTP ' + dlResult.status);
-if (dlResult.status !== 200) {
-  log('Download body: ' + dlResult.body.slice(0, 300));
-  process.exit(1);
-}
 
-const url = dlResult.body.trim().replace(/^"|"$/g, '');
-
-// DIAGNOSTIC: find download handler in anyipa's JS bundle
-log('Searching anyipa JS bundle for download logic...');
-await page.goto(BASE + '/app/us/' + APP_ID, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
-try { await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 15000 }); } catch(e) {}
-
-// Find JS bundle URLs
-const scripts = await page.evaluate(() =>
-  Array.from(document.querySelectorAll('script[src]')).map(s => s.src)
-);
-log('scripts: ' + JSON.stringify(scripts));
-
-// Fetch each bundle and search for download/ouo/r2 references
-for (const src of scripts) {
   try {
-    const r = await page.evaluate(async (s) => {
-      const res = await fetch(s);
-      return res.ok ? await res.text() : null;
-    }, src);
-    if (!r) continue;
-    if (/ouo|r2\.cloud|download|shortlink/i.test(r)) {
-      // Extract surrounding context of relevant matches
-      const matches = [];
-      const re = /(ouo|r2\.cloud|\/api\/download|startsWith|01bb7d)/gi;
-      let m;
-      while ((m = re.exec(r)) !== null) {
-        matches.push(r.slice(Math.max(0, m.index - 120), m.index + 300).replace(/\s+/g, ' '));
-        if (matches.length >= 15) break;
-      }
-      log('bundle ' + src.split('/').pop() + ' matches: ' + JSON.stringify(matches));
+    const ctx = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 800 },
+    });
+
+    // ── Sign in ──────────────────────────────────────────────────────────────
+    const page = await ctx.newPage();
+    console.log('→ signing in');
+    await page.goto('https://anyipa.me/sign-in', { waitUntil: 'networkidle', timeout: 60_000 });
+    await page.fill('input[type="text"].form-control', USER);
+    await page.fill('input[type="password"].form-control', PASS);
+    await page.click('button.btn-primary');
+    await page.waitForURL(/anyipa\.me\/?$/, { timeout: 30_000 });
+    console.log('→ signed in');
+
+    // ── Search for Reddit ─────────────────────────────────────────────────────
+    const entries = await page.evaluate(() =>
+      fetch('/api/search/us/reddit').then(r => r.json())
+    );
+    const reddit = entries.find(e => +e.app_id === 1064216828);
+    if (!reddit) throw new Error('Reddit not found in search results');
+    const { app_id, app_ver_id, version } = reddit;
+    console.log(`→ Reddit ${version}  app_id=${app_id}  app_ver_id=${app_ver_id}`);
+
+    // ── Get download URL ──────────────────────────────────────────────────────
+    const { dlStatus, dlText } = await page.evaluate(
+      ([id, vid]) =>
+        fetch(`/api/download/${id}/${vid}`).then(async r => ({
+          dlStatus: r.status,
+          dlText: await r.text(),
+        })),
+      [String(app_id), String(app_ver_id)]
+    );
+
+    if (dlStatus === 400) throw new Error(`Daily limit reached: ${dlText}`);
+    if (dlStatus !== 200) throw new Error(`/api/download → ${dlStatus}: ${dlText}`);
+
+    const dlUrl = dlText.trim();
+    console.log(`→ /api/download returned: ${dlUrl.startsWith('https://01bb7d') ? '[direct R2]' : dlUrl}`);
+
+    // ── Resolve to IPA URL ────────────────────────────────────────────────────
+    let ipaUrl;
+
+    if (dlUrl.startsWith('https://01bb7d075d994c2be13711816b337026')) {
+      // Server returned presigned R2 link directly — free pass
+      ipaUrl = dlUrl;
+      console.log('→ direct R2 URL, skipping ouo.io');
+    } else if (dlUrl.includes('ouo.io')) {
+      // Navigate through ouo.io in the same browser context to avoid CF IP block
+      const anyipaDlUrl = await resolveViaOuo(ctx, dlUrl);
+
+      // Follow the anyipa.me/download/{id} → R2 302 redirect
+      const cookies = await ctx.cookies(['https://anyipa.me']);
+      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+      ipaUrl = await follow302(anyipaDlUrl, cookieStr);
+      console.log('→ R2 URL resolved');
+    } else {
+      throw new Error(`Unrecognised /api/download response: ${dlUrl}`);
     }
-  } catch(e) { log('bundle fetch error: ' + e.message); }
+
+    // ── Download IPA ──────────────────────────────────────────────────────────
+    // Mask URL in logs before printing
+    if (process.env.GITHUB_ACTIONS) {
+      console.log(`::add-mask::${ipaUrl}`);
+    }
+    console.log('→ downloading IPA');
+    const dl = spawnSync('curl', ['-L', '--max-time', '300', '-o', OUT, ipaUrl], {
+      stdio: 'inherit',
+    });
+    if (dl.status !== 0) throw new Error(`curl exited ${dl.status}`);
+
+    // ── Verify ZIP magic ──────────────────────────────────────────────────────
+    const buf = Buffer.alloc(4);
+    const fd = fs.openSync(OUT, 'r');
+    fs.readSync(fd, buf, 0, 4, 0);
+    fs.closeSync(fd);
+    if (buf[0] !== 0x50 || buf[1] !== 0x4b) {
+      throw new Error(`Not a ZIP — magic bytes: ${buf.toString('hex')}`);
+    }
+
+    // ── Write GitHub Actions outputs ──────────────────────────────────────────
+    const ghOut = process.env.GITHUB_OUTPUT;
+    if (ghOut) {
+      fs.appendFileSync(ghOut, `ipa_url=${ipaUrl}\nipa_version=${version}\n`);
+    }
+    console.log(`→ success  version=${version}  out=${OUT}`);
+
+  } finally {
+    await browser.close();
+  }
 }
 
-await browser.close();
-process.exit(1);
+// Navigate to an ouo.io link inside the same browser context (same CF fingerprint
+// that already passed anyipa's checks). Intercepts the redirect to
+// anyipa.me/download/{id} before following it, and returns that URL.
+async function resolveViaOuo(ctx, ouoUrl) {
+  const pg = await ctx.newPage();
+  let captured = null;
 
-// Resolve ouo.io shortlink via Cloudflare Worker
-log('Resolving via Worker...');
-const workerResp = await fetch(WORKER_URL, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json', 'X-Secret': WORKER_SECRET },
-  body: JSON.stringify({ url }),
+  // Intercept requests — abort as soon as we hit anyipa.me/download/
+  await pg.route('**/*', async route => {
+    const url = route.request().url();
+    if (url.startsWith('https://anyipa.me/download/')) {
+      captured = url;
+      await route.abort();
+    } else {
+      await route.continue();
+    }
+  });
+
+  console.log('→ navigating to ouo.io');
+  try {
+    // 90 s: CF challenge + optional Turnstile + form auto-submit
+    await pg.goto(ouoUrl, { waitUntil: 'networkidle', timeout: 90_000 });
+  } catch (e) {
+    // ERR_ABORTED is expected when our route.abort() fires
+    if (!captured) throw new Error(`ouo.io navigation failed: ${e.message}`);
+  }
+
+  // If the page didn't auto-submit, look for a manual button
+  if (!captured) {
+    console.log('→ auto-submit did not fire; looking for button');
+    try {
+      const btn = await pg.waitForSelector(
+        '#btn-main, button[type="submit"], input[type="submit"]',
+        { timeout: 20_000 }
+      );
+      await btn.click();
+      // Give it time to POST and redirect
+      await pg.waitForTimeout(15_000).catch(() => {});
+    } catch (_) {}
+  }
+
+  // Last-resort: maybe the page actually navigated there despite abort race
+  if (!captured) {
+    const cur = pg.url();
+    if (cur.startsWith('https://anyipa.me/download/')) captured = cur;
+  }
+
+  await pg.close().catch(() => {});
+
+  if (!captured) throw new Error('ouo.io → anyipa redirect was never captured');
+  console.log('→ anyipa download URL captured');
+  return captured;
+}
+
+// Follow one HTTP 302 redirect and return the Location header.
+function follow302(url, cookieStr) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: {
+        Cookie: cookieStr,
+        'User-Agent': 'Mozilla/5.0',
+      },
+    }, res => {
+      res.destroy();
+      if (res.statusCode === 302 && res.headers.location) {
+        resolve(res.headers.location);
+      } else if (res.statusCode === 301 && res.headers.location) {
+        resolve(res.headers.location);
+      } else {
+        reject(new Error(`Expected 302 from anyipa /download/, got ${res.statusCode}`));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+main().catch(e => {
+  console.error(`ERROR: ${e.message}`);
+  process.exit(1);
 });
-const workerJson = await workerResp.json();
-if (!workerResp.ok || !workerJson.resolved) {
-  log('Worker error: ' + JSON.stringify(workerJson));
-  await browser.close();
-  process.exit(1);
-}
-const fileUrl = workerJson.resolved;
-log('Worker resolved host: ' + new URL(fileUrl).hostname);
-
-// 5. Download first bytes to verify it's a valid IPA (zip magic: 504b0304)
-log('Verifying IPA magic...');
-const headResp = await fetch(fileUrl, { method: 'GET', headers: { Range: 'bytes=0-3' } });
-log('IPA fetch status: ' + headResp.status);
-if (!headResp.ok) {
-  log('IPA fetch failed');
-  await browser.close();
-  process.exit(1);
-}
-const buf = await headResp.arrayBuffer();
-const magic = Buffer.from(buf).toString('hex');
-log('IPA magic: ' + magic);
-
-await browser.close();
-console.log('DOWNLOAD_URL=' + fileUrl);
-console.log('DOWNLOAD_MAGIC=' + magic);
