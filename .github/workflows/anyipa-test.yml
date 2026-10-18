@@ -18,7 +18,7 @@ jobs:
         env:
           ANYIPA_USER: ${{ secrets.ANYIPA_USER }}
           ANYIPA_PASS: ${{ secrets.ANYIPA_PASS }}
-          OUO_WORKER_URL: ${{ vars.OUO_WORKER_URL }}
+          OUO_WORKER_URL: https://ouo-resolver.casper-thorsvik.workers.dev
           OUO_WORKER_SECRET: ${{ secrets.OUO_WORKER_SECRET }}
         run: |
           set -euo pipefail
