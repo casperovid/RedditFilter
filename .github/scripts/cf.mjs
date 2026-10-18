@@ -63,14 +63,10 @@ async function main() {
     let ipaUrl;
 
     if (dlUrl.startsWith('https://01bb7d075d994c2be13711816b337026')) {
-      // Server returned presigned R2 link directly — free pass
       ipaUrl = dlUrl;
       console.log('→ direct R2 URL, skipping ouo.io');
     } else if (dlUrl.includes('ouo.io')) {
-      // Navigate through ouo.io in the same browser context to avoid CF IP block
       const anyipaDlUrl = await resolveViaOuo(ctx, dlUrl);
-
-      // Follow the anyipa.me/download/{id} → R2 302 redirect
       const cookies = await ctx.cookies(['https://anyipa.me']);
       const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
       ipaUrl = await follow302(anyipaDlUrl, cookieStr);
@@ -80,7 +76,6 @@ async function main() {
     }
 
     // ── Download IPA ──────────────────────────────────────────────────────────
-    // Mask URL in logs before printing
     if (process.env.GITHUB_ACTIONS) {
       console.log(`::add-mask::${ipaUrl}`);
     }
@@ -111,14 +106,10 @@ async function main() {
   }
 }
 
-// Navigate to an ouo.io link inside the same browser context (same CF fingerprint
-// that already passed anyipa's checks). Intercepts the redirect to
-// anyipa.me/download/{id} before following it, and returns that URL.
 async function resolveViaOuo(ctx, ouoUrl) {
   const pg = await ctx.newPage();
   let captured = null;
 
-  // Intercept requests — abort as soon as we hit anyipa.me/download/
   await pg.route('**/*', async route => {
     const url = route.request().url();
     if (url.startsWith('https://anyipa.me/download/')) {
@@ -131,28 +122,29 @@ async function resolveViaOuo(ctx, ouoUrl) {
 
   console.log('→ navigating to ouo.io');
   try {
-    // 90 s: CF challenge + optional Turnstile + form auto-submit
     await pg.goto(ouoUrl, { waitUntil: 'networkidle', timeout: 90_000 });
   } catch (e) {
-    // ERR_ABORTED is expected when our route.abort() fires
     if (!captured) throw new Error(`ouo.io navigation failed: ${e.message}`);
   }
 
-  // If the page didn't auto-submit, look for a manual button
+  // form.submit() bypasses the Turnstile JS guard on the button.
+  // Server-side ouo.io doesn't validate x-token (confirmed in HAR: it was empty).
   if (!captured) {
-    console.log('→ auto-submit did not fire; looking for button');
+    console.log(`→ ouo page URL: ${pg.url()}`);
     try {
-      const btn = await pg.waitForSelector(
-        '#btn-main, button[type="submit"], input[type="submit"]',
-        { timeout: 20_000 }
-      );
-      await btn.click();
-      // Give it time to POST and redirect
+      const result = await pg.evaluate(() => {
+        const form = document.querySelector('form');
+        if (!form) return 'no form';
+        form.submit();
+        return 'submitted';
+      });
+      console.log(`→ form.submit(): ${result}`);
       await pg.waitForTimeout(15_000).catch(() => {});
-    } catch (_) {}
+    } catch (e) {
+      console.log(`→ form.submit() error: ${e.message}`);
+    }
   }
 
-  // Last-resort: maybe the page actually navigated there despite abort race
   if (!captured) {
     const cur = pg.url();
     if (cur.startsWith('https://anyipa.me/download/')) captured = cur;
@@ -165,7 +157,6 @@ async function resolveViaOuo(ctx, ouoUrl) {
   return captured;
 }
 
-// Follow one HTTP 302 redirect and return the Location header.
 function follow302(url, cookieStr) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
