@@ -104,6 +104,17 @@ if (dlResult.status !== 200) {
 
 const url = dlResult.body.trim().replace(/^"|"$/g, '');
 
+// DIAGNOSTIC: shape of the download response (keys + hostnames only, no values)
+try {
+  const parsed = JSON.parse(dlResult.body);
+  log('dl body type: ' + (Array.isArray(parsed) ? 'array' : typeof parsed) + (typeof parsed === 'object' ? ' keys: ' + JSON.stringify(Object.keys(parsed)) : ''));
+} catch (e) { log('dl body is not JSON'); }
+log('dl body length: ' + dlResult.body.length);
+log('dl body hostnames: ' + JSON.stringify([...new Set((dlResult.body.match(/https?:\/\/[^"\s\\]+/g) || []).map(u => { try { return new URL(u).hostname; } catch { return '?'; } }))]));
+log('search entry keys: ' + JSON.stringify(Object.keys(entry)));
+await browser.close();
+process.exit(1);
+
 // DIAGNOSTIC: the link is an ouo.io shortlink. Open it and report what we land on (no URLs logged).
 log('Download URL host: ' + new URL(url).hostname);
 const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => { log('goto error: ' + e.message.split('\n')[0]); return null; });
