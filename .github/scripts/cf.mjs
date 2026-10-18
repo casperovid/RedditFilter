@@ -24,7 +24,6 @@ async function main() {
       viewport: { width: 1280, height: 800 },
     });
 
-    // ── Sign in ──────────────────────────────────────────────────────────────
     const page = await ctx.newPage();
     console.log('→ signing in');
     await page.goto('https://anyipa.me/sign-in', { waitUntil: 'networkidle', timeout: 60_000 });
@@ -34,7 +33,6 @@ async function main() {
     await page.waitForURL(/anyipa\.me\/?$/, { timeout: 30_000 });
     console.log('→ signed in');
 
-    // ── Search for Reddit ─────────────────────────────────────────────────────
     const entries = await page.evaluate(() =>
       fetch('/api/search/us/reddit').then(r => r.json())
     );
@@ -43,7 +41,6 @@ async function main() {
     const { app_id, app_ver_id, version } = reddit;
     console.log(`→ Reddit ${version}  app_id=${app_id}  app_ver_id=${app_ver_id}`);
 
-    // ── Get download URL ──────────────────────────────────────────────────────
     const { dlStatus, dlText } = await page.evaluate(
       ([id, vid]) =>
         fetch(`/api/download/${id}/${vid}`).then(async r => ({
@@ -59,14 +56,13 @@ async function main() {
     const dlUrl = dlText.trim();
     console.log(`→ /api/download returned: ${dlUrl.startsWith('https://01bb7d') ? '[direct R2]' : dlUrl}`);
 
-    // ── Resolve to IPA URL ────────────────────────────────────────────────────
     let ipaUrl;
 
     if (dlUrl.startsWith('https://01bb7d075d994c2be13711816b337026')) {
       ipaUrl = dlUrl;
       console.log('→ direct R2 URL, skipping ouo.io');
     } else if (dlUrl.includes('ouo.io')) {
-      const anyipaDlUrl = await resolveViaOuo(ctx, dlUrl);
+      const anyipaDlUrl = await resolveViaOuo(ctx, page, dlUrl);
       const cookies = await ctx.cookies(['https://anyipa.me']);
       const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
       ipaUrl = await follow302(anyipaDlUrl, cookieStr);
@@ -75,7 +71,6 @@ async function main() {
       throw new Error(`Unrecognised /api/download response: ${dlUrl}`);
     }
 
-    // ── Download IPA ──────────────────────────────────────────────────────────
     if (process.env.GITHUB_ACTIONS) {
       console.log(`::add-mask::${ipaUrl}`);
     }
@@ -85,7 +80,6 @@ async function main() {
     });
     if (dl.status !== 0) throw new Error(`curl exited ${dl.status}`);
 
-    // ── Verify ZIP magic ──────────────────────────────────────────────────────
     const buf = Buffer.alloc(4);
     const fd = fs.openSync(OUT, 'r');
     fs.readSync(fd, buf, 0, 4, 0);
@@ -94,7 +88,6 @@ async function main() {
       throw new Error(`Not a ZIP — magic bytes: ${buf.toString('hex')}`);
     }
 
-    // ── Write GitHub Actions outputs ──────────────────────────────────────────
     const ghOut = process.env.GITHUB_OUTPUT;
     if (ghOut) {
       fs.appendFileSync(ghOut, `ipa_url=${ipaUrl}\nipa_version=${version}\n`);
@@ -106,11 +99,10 @@ async function main() {
   }
 }
 
-async function resolveViaOuo(ctx, ouoUrl) {
-  const pg = await ctx.newPage();
+async function resolveViaOuo(ctx, page, ouoUrl) {
   let captured = null;
 
-  await pg.route('**/*', async route => {
+  const handler = async route => {
     const url = route.request().url();
     if (url.startsWith('https://anyipa.me/download/')) {
       captured = url;
@@ -118,39 +110,34 @@ async function resolveViaOuo(ctx, ouoUrl) {
     } else {
       await route.continue();
     }
-  });
+  };
+  await ctx.route('**/*', handler);
 
-  console.log('→ navigating to ouo.io');
+  console.log('→ opening ouo.io via window.open from anyipa.me tab');
+  let ouoPage;
   try {
-    await pg.goto(ouoUrl, { waitUntil: 'networkidle', timeout: 90_000 });
+    [ouoPage] = await Promise.all([
+      ctx.waitForEvent('page', { timeout: 10_000 }),
+      page.evaluate(url => window.open(url, '_blank'), ouoUrl),
+    ]);
   } catch (e) {
-    if (!captured) throw new Error(`ouo.io navigation failed: ${e.message}`);
+    await ctx.unroute('**/*', handler);
+    throw new Error(`window.open failed: ${e.message}`);
   }
 
-  // form.submit() bypasses the Turnstile JS guard on the button.
-  // Server-side ouo.io doesn't validate x-token (confirmed in HAR: it was empty).
-  if (!captured) {
-    console.log(`→ ouo page URL: ${pg.url()}`);
-    try {
-      const result = await pg.evaluate(() => {
-        const form = document.querySelector('form');
-        if (!form) return 'no form';
-        form.submit();
-        return 'submitted';
-      });
-      console.log(`→ form.submit(): ${result}`);
-      await pg.waitForTimeout(15_000).catch(() => {});
-    } catch (e) {
-      console.log(`→ form.submit() error: ${e.message}`);
+  try {
+    await ouoPage.waitForURL(u => !u.includes('ouo.io'), { timeout: 90_000 });
+    if (!captured) {
+      const cur = ouoPage.url();
+      if (cur.startsWith('https://anyipa.me/download/')) captured = cur;
     }
-  }
+  } catch { /* timeout — captured may still be set */ }
 
-  if (!captured) {
-    const cur = pg.url();
-    if (cur.startsWith('https://anyipa.me/download/')) captured = cur;
-  }
+  const finalUrl = ouoPage.url();
+  console.log(`→ ouo tab final URL: ${finalUrl.startsWith('https://anyipa.me/download/') ? '[anyipa download]' : finalUrl}`);
 
-  await pg.close().catch(() => {});
+  await ouoPage.close().catch(() => {});
+  await ctx.unroute('**/*', handler);
 
   if (!captured) throw new Error('ouo.io → anyipa redirect was never captured');
   console.log('→ anyipa download URL captured');
