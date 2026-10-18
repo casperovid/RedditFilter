@@ -11,11 +11,14 @@ chromium.use(StealthPlugin());
 const BASE = 'https://anyipa.me';
 const USER = process.env.ANYIPA_USER;
 const PASS = process.env.ANYIPA_PASS;
+const WORKER_URL = process.env.OUO_WORKER_URL;
+const WORKER_SECRET = process.env.OUO_WORKER_SECRET;
 const PASS_MD5 = PASS ? createHash('md5').update(PASS).digest('hex') : null;
 
 function log(msg) { process.stderr.write(msg + '\n'); }
 
 if (!USER || !PASS) { log('Missing ANYIPA_USER or ANYIPA_PASS'); process.exit(1); }
+if (!WORKER_URL || !WORKER_SECRET) { log('Missing OUO_WORKER_URL or OUO_WORKER_SECRET'); process.exit(1); }
 
 const browser = await chromium.launch({
   headless: false, // run under xvfb in CI; headed looks far less like a bot
@@ -104,23 +107,35 @@ if (dlResult.status !== 200) {
 
 const url = dlResult.body.trim().replace(/^"|"$/g, '');
 
-// DIAGNOSTIC: the link is an ouo.io shortlink. Open it and report what we land on (no URLs logged).
-log('Download URL host: ' + new URL(url).hostname);
-const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => { log('goto error: ' + e.message.split('\n')[0]); return null; });
-try {
-  await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 45000 });
-  log('CF passed on ouo.io');
-} catch (e) { log('CF still blocking ouo.io after 45s'); }
-await page.waitForTimeout(6000);
-log('ouo buttons/links: ' + JSON.stringify(await page.evaluate(() =>
-  Array.from(document.querySelectorAll('button, a, input[type=submit], form')).slice(0, 15).map(el => ({
-    tag: el.tagName, id: el.id, text: (el.innerText || el.value || '').trim().slice(0, 40), href: el.tagName === 'A' ? new URL(el.href, location.href).hostname : undefined
-  }))
-)));
-log('ouo status: ' + (resp ? resp.status() : 'none'));
-log('ouo final host: ' + new URL(page.url()).hostname);
-log('ouo title: ' + (await page.title()));
-log('ouo page text (first 300): ' + (await page.evaluate(() => document.body.innerText.slice(0, 300).replace(/\s+/g, ' '))));
-log('ouo has captcha iframe/widget: ' + (await page.evaluate(() => !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="turnstile"], iframe[src*="hcaptcha"], .g-recaptcha, .cf-turnstile'))));
+// Resolve ouo.io shortlink via Cloudflare Worker
+log('Resolving via Worker...');
+const workerResp = await fetch(WORKER_URL, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'X-Secret': WORKER_SECRET },
+  body: JSON.stringify({ url }),
+});
+const workerJson = await workerResp.json();
+if (!workerResp.ok || !workerJson.resolved) {
+  log('Worker error: ' + JSON.stringify(workerJson));
+  await browser.close();
+  process.exit(1);
+}
+const fileUrl = workerJson.resolved;
+log('Worker resolved host: ' + new URL(fileUrl).hostname);
+
+// 5. Download first bytes to verify it's a valid IPA (zip magic: 504b0304)
+log('Verifying IPA magic...');
+const headResp = await fetch(fileUrl, { method: 'GET', headers: { Range: 'bytes=0-3' } });
+log('IPA fetch status: ' + headResp.status);
+if (!headResp.ok) {
+  log('IPA fetch failed');
+  await browser.close();
+  process.exit(1);
+}
+const buf = await headResp.arrayBuffer();
+const magic = Buffer.from(buf).toString('hex');
+log('IPA magic: ' + magic);
+
 await browser.close();
-process.exit(1);
+console.log('DOWNLOAD_URL=' + fileUrl);
+console.log('DOWNLOAD_MAGIC=' + magic);
