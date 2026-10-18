@@ -1,100 +1,104 @@
 import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { spawn, spawnSync } from 'child_process';
+import fs from 'fs';
 
 chromium.use(StealthPlugin());
 
-const USER = process.env.ANYIPA_USER;
-const PASS = process.env.ANYIPA_PASS;
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const CHALLENGE = /just a moment|security verification|attention required|checking your browser/i;
+const TOR_PORT = 9150;
 
-const TIER_KEY = /(premium|expire|date|limit|daily|count|left|remain|grade|plan|status|type|level)/i;
-
-function describe(v, key = '', depth = 0) {
-  if (v === null) return 'null';
-  if (Array.isArray(v)) {
-    return `array(${v.length})` + (v.length && depth < 3 ? ` of ${describe(v[0], key, depth + 1)}` : '');
-  }
-  const t = typeof v;
-  if (t === 'boolean') return `boolean=${v}`;
-  if (t === 'number') return TIER_KEY.test(key) ? `number=${v}` : 'number';
-  if (t === 'string') return TIER_KEY.test(key) && v.length <= 30 ? `string="${v}"` : `string(len ${v.length})`;
-  if (t === 'object') {
-    if (depth >= 3) return 'object{…}';
-    return '{ ' + Object.entries(v).slice(0, 30).map(([k, x]) => `${k}: ${describe(x, k, depth + 1)}`).join(', ') + ' }';
-  }
-  return t;
-}
-
-function contexts(src, needle, radius, cap) {
-  const out = [];
-  let from = 0;
-  while (out.length < cap) {
-    const i = src.indexOf(needle, from);
-    if (i === -1) break;
-    out.push(src.slice(Math.max(0, i - radius), Math.min(src.length, i + needle.length + radius)).replace(/\s+/g, ' '));
-    from = i + needle.length + radius;
-  }
-  return out;
-}
-
-async function main() {
-  if (!USER || !PASS) throw new Error('ANYIPA_USER / ANYIPA_PASS not set');
-
+async function probe(label, proxy) {
   const browser = await chromium.launch({
     headless: false,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    ...(proxy ? { proxy: { server: proxy } } : {}),
   });
-
+  let passed = true;
   try {
-    const ctx = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 800 },
-    });
+    const ctx = await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 800 } });
     const page = await ctx.newPage();
 
-    console.log('→ signing in');
-    await page.goto('https://anyipa.me/sign-in', { waitUntil: 'networkidle', timeout: 60_000 });
-    await page.fill('input[type="text"].form-control', USER);
-    await page.fill('input[type="password"].form-control', PASS);
-    await page.click('button.btn-primary');
-    await page.waitForURL(/anyipa\.me\/?$/, { timeout: 30_000 });
-    await page.waitForTimeout(3_000);
-    console.log('→ signed in');
+    if (proxy) {
+      try {
+        await page.goto('https://check.torproject.org/api/ip', { waitUntil: 'domcontentloaded', timeout: 45_000 });
+        const body = await page.evaluate(() => document.body.innerText);
+        console.log(`[${label}] check.torproject.org IsTor=${JSON.parse(body).IsTor}`);
+      } catch (e) {
+        console.log(`[${label}] Tor check failed: ${e.message.split('\n')[0]}`);
+      }
+    }
 
-    // Account info (read-only by name; not verified)
-    const info = await page.evaluate(async () => {
-      const r = await fetch('/api/info');
-      const text = await r.text();
-      return { status: r.status, text };
-    });
-    let shape;
-    try { shape = describe(JSON.parse(info.text)); } catch { shape = `text(len ${info.text.length})`; }
-    console.log(`→ GET /api/info → ${info.status} ${shape}`);
-
-    // Public frontend code around the endpoints not yet examined
-    const bundleUrl = await page.evaluate(() =>
-      [...document.querySelectorAll('script[src]')].map(s => s.src).find(s => s.includes('/static/js/main.'))
-    );
-    const src = await page.evaluate(u => fetch(u).then(r => r.text()), bundleUrl);
-    console.log(`→ bundle ${bundleUrl.split('/').pop()} (${src.length} chars)`);
-
-    for (const needle of [
-      '/api/install/',
-      '/api/feather/install',
-      '/api/feather/cert',
-      '/api/sign/',
-      '/api/check/sign/',
-      '/api/portal',
-      '/api/pay/service/',
-      '/api/info',
-      '/api/download/',
-    ]) {
-      const hits = contexts(src, needle, 450, 4);
-      console.log(`\n→ "${needle}" (${hits.length} hit${hits.length === 1 ? '' : 's'}):`);
-      hits.forEach((h, i) => console.log(`  [${i + 1}] ${h}`));
+    for (const url of ['https://ouo.io/', 'https://ouo.io/AAAAAA']) {
+      let status = 'none';
+      let title = '';
+      try {
+        const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+        status = resp ? resp.status() : 'none';
+        for (let i = 0; i < 20; i++) {           // up to ~40 s for the challenge to clear
+          title = await page.title();
+          if (!CHALLENGE.test(title)) break;
+          await page.waitForTimeout(2_000);
+        }
+      } catch (e) {
+        title = `(error: ${e.message.split('\n')[0].slice(0, 80)})`;
+      }
+      const cleared = !CHALLENGE.test(title) && !title.startsWith('(error');
+      if (!cleared) passed = false;
+      console.log(`[${label}] ${url}  firstStatus=${status}  cleared=${cleared}  title="${title.slice(0, 70)}"`);
     }
   } finally {
     await browser.close();
   }
+  return passed;
+}
+
+function installTor() {
+  spawnSync('sudo', ['apt-get', 'update', '-qq'], { stdio: 'ignore' });
+  const r = spawnSync('sudo', ['apt-get', 'install', '-y', '-qq', 'tor'], { stdio: 'ignore' });
+  if (r.status !== 0) throw new Error(`apt-get install tor failed (${r.status})`);
+}
+
+function startTor() {
+  fs.rmSync('/tmp/tor-data', { recursive: true, force: true });
+  fs.mkdirSync('/tmp/tor-data', { mode: 0o700 });
+  const proc = spawn('tor', ['--SocksPort', String(TOR_PORT), '--DataDirectory', '/tmp/tor-data'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    const timer = setTimeout(() => { proc.kill(); reject(new Error('tor bootstrap timeout (120 s)')); }, 120_000);
+    proc.stdout.on('data', d => {
+      buf += d.toString();
+      if (/Bootstrapped 100%/.test(buf)) { clearTimeout(timer); resolve(proc); }
+    });
+    proc.on('exit', code => { clearTimeout(timer); reject(new Error(`tor exited early (${code})`)); });
+  });
+}
+
+async function main() {
+  console.log('=== baseline: direct from runner ===');
+  await probe('direct', null);
+
+  console.log('\n=== installing Tor ===');
+  installTor();
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    console.log(`\n=== Tor attempt ${attempt}/3 (fresh circuit) ===`);
+    let tor;
+    try {
+      tor = await startTor();
+      console.log('→ tor bootstrapped');
+      const ok = await probe(`tor#${attempt}`, `socks5://127.0.0.1:${TOR_PORT}`);
+      if (ok) { console.log('→ ouo.io challenge CLEARED via Tor'); return; }
+    } catch (e) {
+      console.log(`→ attempt ${attempt} error: ${e.message}`);
+    } finally {
+      if (tor) { tor.removeAllListeners('exit'); tor.kill(); }
+    }
+  }
+  console.log('→ ouo.io challenge did NOT clear via Tor in 3 attempts');
 }
 
 main().catch(e => {
