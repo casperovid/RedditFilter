@@ -3,19 +3,42 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
 chromium.use(StealthPlugin());
 
-function contexts(src, re, radius, cap) {
+const USER = process.env.ANYIPA_USER;
+const PASS = process.env.ANYIPA_PASS;
+
+const TIER_KEY = /(premium|expire|date|limit|daily|count|left|remain|grade|plan|status|type|level)/i;
+
+function describe(v, key = '', depth = 0) {
+  if (v === null) return 'null';
+  if (Array.isArray(v)) {
+    return `array(${v.length})` + (v.length && depth < 3 ? ` of ${describe(v[0], key, depth + 1)}` : '');
+  }
+  const t = typeof v;
+  if (t === 'boolean') return `boolean=${v}`;
+  if (t === 'number') return TIER_KEY.test(key) ? `number=${v}` : 'number';
+  if (t === 'string') return TIER_KEY.test(key) && v.length <= 30 ? `string="${v}"` : `string(len ${v.length})`;
+  if (t === 'object') {
+    if (depth >= 3) return 'object{…}';
+    return '{ ' + Object.entries(v).slice(0, 30).map(([k, x]) => `${k}: ${describe(x, k, depth + 1)}`).join(', ') + ' }';
+  }
+  return t;
+}
+
+function contexts(src, needle, radius, cap) {
   const out = [];
-  let m;
-  while ((m = re.exec(src)) && out.length < cap) {
-    const a = Math.max(0, m.index - radius);
-    const b = Math.min(src.length, m.index + m[0].length + radius);
-    out.push(src.slice(a, b).replace(/\s+/g, ' '));
-    re.lastIndex = m.index + m[0].length + radius; // skip overlapping hits
+  let from = 0;
+  while (out.length < cap) {
+    const i = src.indexOf(needle, from);
+    if (i === -1) break;
+    out.push(src.slice(Math.max(0, i - radius), Math.min(src.length, i + needle.length + radius)).replace(/\s+/g, ' '));
+    from = i + needle.length + radius;
   }
   return out;
 }
 
 async function main() {
+  if (!USER || !PASS) throw new Error('ANYIPA_USER / ANYIPA_PASS not set');
+
   const browser = await chromium.launch({
     headless: false,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -28,32 +51,46 @@ async function main() {
     });
     const page = await ctx.newPage();
 
-    console.log('→ loading anyipa.me');
-    await page.goto('https://anyipa.me/', { waitUntil: 'networkidle', timeout: 60_000 });
+    console.log('→ signing in');
+    await page.goto('https://anyipa.me/sign-in', { waitUntil: 'networkidle', timeout: 60_000 });
+    await page.fill('input[type="text"].form-control', USER);
+    await page.fill('input[type="password"].form-control', PASS);
+    await page.click('button.btn-primary');
+    await page.waitForURL(/anyipa\.me\/?$/, { timeout: 30_000 });
+    await page.waitForTimeout(3_000);
+    console.log('→ signed in');
 
-    const scripts = await page.evaluate(() =>
-      [...document.querySelectorAll('script[src]')].map(s => s.src)
+    // Account info (read-only by name; not verified)
+    const info = await page.evaluate(async () => {
+      const r = await fetch('/api/info');
+      const text = await r.text();
+      return { status: r.status, text };
+    });
+    let shape;
+    try { shape = describe(JSON.parse(info.text)); } catch { shape = `text(len ${info.text.length})`; }
+    console.log(`→ GET /api/info → ${info.status} ${shape}`);
+
+    // Public frontend code around the endpoints not yet examined
+    const bundleUrl = await page.evaluate(() =>
+      [...document.querySelectorAll('script[src]')].map(s => s.src).find(s => s.includes('/static/js/main.'))
     );
-    const bundles = scripts.filter(s => s.includes('/static/js/') && s.endsWith('.js'));
-    console.log(`→ bundles: ${bundles.map(b => b.split('/').pop()).join(', ')}`);
+    const src = await page.evaluate(u => fetch(u).then(r => r.text()), bundleUrl);
+    console.log(`→ bundle ${bundleUrl.split('/').pop()} (${src.length} chars)`);
 
-    for (const url of bundles) {
-      const src = await page.evaluate(u => fetch(u).then(r => r.text()), url);
-      console.log(`\n=== ${url.split('/').pop()}  (${src.length} chars) ===`);
-
-      const paths = [...new Set([...src.matchAll(/["'`](\/api\/[^"'`\s]{1,80})["'`]/g)].map(m => m[1]))];
-      console.log(`→ /api/ strings (${paths.length}):`);
-      for (const p of paths) console.log('   ' + p);
-
-      for (const [label, re, radius, cap] of [
-        ['grade', /grade/gi, 160, 25],
-        ['premium', /premium/gi, 160, 15],
-        ['ouo', /ouo/gi, 200, 10],
-      ]) {
-        const hits = contexts(src, re, radius, cap);
-        console.log(`\n→ "${label}" contexts (${hits.length}):`);
-        hits.forEach((h, i) => console.log(`  [${i + 1}] ${h}`));
-      }
+    for (const needle of [
+      '/api/install/',
+      '/api/feather/install',
+      '/api/feather/cert',
+      '/api/sign/',
+      '/api/check/sign/',
+      '/api/portal',
+      '/api/pay/service/',
+      '/api/info',
+      '/api/download/',
+    ]) {
+      const hits = contexts(src, needle, 450, 4);
+      console.log(`\n→ "${needle}" (${hits.length} hit${hits.length === 1 ? '' : 's'}):`);
+      hits.forEach((h, i) => console.log(`  [${i + 1}] ${h}`));
     }
   } finally {
     await browser.close();
