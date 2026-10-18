@@ -129,11 +129,11 @@ for (const src of scripts) {
     if (/ouo|r2\.cloud|download|shortlink/i.test(r)) {
       // Extract surrounding context of relevant matches
       const matches = [];
-      const re = /(ouo|r2\.cloud|\/api\/download|shortlink)/gi;
+      const re = /(ouo|r2\.cloud|\/api\/download|startsWith|01bb7d)/gi;
       let m;
       while ((m = re.exec(r)) !== null) {
-        matches.push(r.slice(Math.max(0, m.index - 80), m.index + 120).replace(/\s+/g, ' '));
-        if (matches.length >= 10) break;
+        matches.push(r.slice(Math.max(0, m.index - 120), m.index + 300).replace(/\s+/g, ' '));
+        if (matches.length >= 15) break;
       }
       log('bundle ' + src.split('/').pop() + ' matches: ' + JSON.stringify(matches));
     }
