@@ -1,107 +1,73 @@
 import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { spawn, spawnSync } from 'child_process';
-import fs from 'fs';
 
 chromium.use(StealthPlugin());
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-const CHALLENGE = /just a moment|security verification|attention required|checking your browser/i;
-const TOR_PORT = 9150;
+const USER = process.env.ANYIPA_USER;
+const PASS = process.env.ANYIPA_PASS;
 
-async function probe(label, proxy) {
-  const browser = await chromium.launch({
-    headless: false,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    ...(proxy ? { proxy: { server: proxy } } : {}),
-  });
-  let passed = true;
+async function main() {
+  if (!USER || !PASS) throw new Error('ANYIPA_USER / ANYIPA_PASS not set');
+  const browser = await chromium.launch({ headless: false, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
   try {
-    const ctx = await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 800 } });
+    const ctx = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 800 },
+    });
     const page = await ctx.newPage();
+    console.log('→ signing in');
+    await page.goto('https://anyipa.me/sign-in', { waitUntil: 'networkidle', timeout: 60_000 });
+    await page.fill('input[type="text"].form-control', USER);
+    await page.fill('input[type="password"].form-control', PASS);
+    await page.click('button.btn-primary');
+    await page.waitForURL(/anyipa\.me\/?$/, { timeout: 30_000 });
+    await page.waitForTimeout(2_000);
+    console.log('→ signed in');
 
-    if (proxy) {
-      try {
-        await page.goto('https://check.torproject.org/api/ip', { waitUntil: 'domcontentloaded', timeout: 45_000 });
-        const body = await page.evaluate(() => document.body.innerText);
-        console.log(`[${label}] check.torproject.org IsTor=${JSON.parse(body).IsTor}`);
-      } catch (e) {
-        console.log(`[${label}] Tor check failed: ${e.message.split('\n')[0]}`);
-      }
-    }
+    // Known Reddit identifiers
+    const APP_ID     = '1064216828';
+    const APP_VER_ID = '892724836';
 
-    for (const url of ['https://ouo.io/', 'https://ouo.io/AAAAAA']) {
-      let status = 'none';
-      let title = '';
-      try {
-        const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-        status = resp ? resp.status() : 'none';
-        for (let i = 0; i < 20; i++) {           // up to ~40 s for the challenge to clear
-          title = await page.title();
-          if (!CHALLENGE.test(title)) break;
-          await page.waitForTimeout(2_000);
+    // Probe /download/{candidate} — follow redirects and report where we end up
+    const candidates = [
+      APP_VER_ID,
+      APP_ID,
+      `${APP_ID}-${APP_VER_ID}`,
+      APP_VER_ID.split('').reverse().join(''),   // just a sanity scramble
+    ];
+
+    for (const id of candidates) {
+      const url = `https://anyipa.me/download/${id}`;
+      const result = await page.evaluate(async (u) => {
+        try {
+          const r = await fetch(u, { redirect: 'follow' });
+          return { status: r.status, finalUrl: r.url, ok: r.ok };
+        } catch (e) {
+          return { error: e.message };
         }
-      } catch (e) {
-        title = `(error: ${e.message.split('\n')[0].slice(0, 80)})`;
-      }
-      const cleared = !CHALLENGE.test(title) && !title.startsWith('(error');
-      if (!cleared) passed = false;
-      console.log(`[${label}] ${url}  firstStatus=${status}  cleared=${cleared}  title="${title.slice(0, 70)}"`);
+      }, url);
+      const dest = result.finalUrl || result.error || '(no url)';
+      const isR2 = dest.startsWith('https://01bb7d075d994c2be13711816b337026');
+      console.log(`/download/${id} → status=${result.status ?? '?'} r2=${isR2} dest=${isR2 ? '[R2]' : dest.slice(0, 120)}`);
     }
+
+    // Also check: does the latest-entries list expose a direct IPA field?
+    const latest = await page.evaluate(() =>
+      fetch('/api/latest/0').then(r => r.json())
+    );
+    const reddit = latest.find(e => +e.app_id === 1064216828);
+    if (reddit) {
+      const keys = Object.keys(reddit).filter(k => {
+        const v = String(reddit[k]);
+        return v.startsWith('http') || v.includes('.ipa') || v.includes('download');
+      });
+      console.log(`\n→ Reddit entry URL-like fields: ${keys.length ? keys.map(k => `${k}=${String(reddit[k]).slice(0,80)}`).join(' | ') : 'none'}`);
+    } else {
+      console.log('\n→ Reddit not found in /api/latest/0');
+    }
+
   } finally {
     await browser.close();
   }
-  return passed;
 }
-
-function installTor() {
-  spawnSync('sudo', ['apt-get', 'update', '-qq'], { stdio: 'ignore' });
-  const r = spawnSync('sudo', ['apt-get', 'install', '-y', '-qq', 'tor'], { stdio: 'ignore' });
-  if (r.status !== 0) throw new Error(`apt-get install tor failed (${r.status})`);
-}
-
-function startTor() {
-  fs.rmSync('/tmp/tor-data', { recursive: true, force: true });
-  fs.mkdirSync('/tmp/tor-data', { mode: 0o700 });
-  const proc = spawn('tor', ['--SocksPort', String(TOR_PORT), '--DataDirectory', '/tmp/tor-data'], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  return new Promise((resolve, reject) => {
-    let buf = '';
-    const timer = setTimeout(() => { proc.kill(); reject(new Error('tor bootstrap timeout (120 s)')); }, 120_000);
-    proc.stdout.on('data', d => {
-      buf += d.toString();
-      if (/Bootstrapped 100%/.test(buf)) { clearTimeout(timer); resolve(proc); }
-    });
-    proc.on('exit', code => { clearTimeout(timer); reject(new Error(`tor exited early (${code})`)); });
-  });
-}
-
-async function main() {
-  console.log('=== baseline: direct from runner ===');
-  await probe('direct', null);
-
-  console.log('\n=== installing Tor ===');
-  installTor();
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    console.log(`\n=== Tor attempt ${attempt}/3 (fresh circuit) ===`);
-    let tor;
-    try {
-      tor = await startTor();
-      console.log('→ tor bootstrapped');
-      const ok = await probe(`tor#${attempt}`, `socks5://127.0.0.1:${TOR_PORT}`);
-      if (ok) { console.log('→ ouo.io challenge CLEARED via Tor'); return; }
-    } catch (e) {
-      console.log(`→ attempt ${attempt} error: ${e.message}`);
-    } finally {
-      if (tor) { tor.removeAllListeners('exit'); tor.kill(); }
-    }
-  }
-  console.log('→ ouo.io challenge did NOT clear via Tor in 3 attempts');
-}
-
-main().catch(e => {
-  console.error(`ERROR: ${e.message}`);
-  process.exit(1);
-});
+main().catch(e => { console.error(`ERROR: ${e.message}`); process.exit(1); });
