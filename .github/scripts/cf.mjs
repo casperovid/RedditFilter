@@ -107,6 +107,42 @@ if (dlResult.status !== 200) {
 
 const url = dlResult.body.trim().replace(/^"|"$/g, '');
 
+// DIAGNOSTIC: find download handler in anyipa's JS bundle
+log('Searching anyipa JS bundle for download logic...');
+await page.goto(BASE + '/app/us/' + APP_ID, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+try { await page.waitForFunction(() => !document.title.includes('Just a moment'), { timeout: 15000 }); } catch(e) {}
+
+// Find JS bundle URLs
+const scripts = await page.evaluate(() =>
+  Array.from(document.querySelectorAll('script[src]')).map(s => s.src)
+);
+log('scripts: ' + JSON.stringify(scripts));
+
+// Fetch each bundle and search for download/ouo/r2 references
+for (const src of scripts) {
+  try {
+    const r = await page.evaluate(async (s) => {
+      const res = await fetch(s);
+      return res.ok ? await res.text() : null;
+    }, src);
+    if (!r) continue;
+    if (/ouo|r2\.cloud|download|shortlink/i.test(r)) {
+      // Extract surrounding context of relevant matches
+      const matches = [];
+      const re = /(ouo|r2\.cloud|\/api\/download|shortlink)/gi;
+      let m;
+      while ((m = re.exec(r)) !== null) {
+        matches.push(r.slice(Math.max(0, m.index - 80), m.index + 120).replace(/\s+/g, ' '));
+        if (matches.length >= 10) break;
+      }
+      log('bundle ' + src.split('/').pop() + ' matches: ' + JSON.stringify(matches));
+    }
+  } catch(e) { log('bundle fetch error: ' + e.message); }
+}
+
+await browser.close();
+process.exit(1);
+
 // Resolve ouo.io shortlink via Cloudflare Worker
 log('Resolving via Worker...');
 const workerResp = await fetch(WORKER_URL, {
